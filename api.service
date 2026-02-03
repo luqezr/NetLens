@@ -1,0 +1,18 @@
+[Unit]
+Description=NetLens API Service
+After=network.target mongodb.service
+
+[Service]
+Type=simple
+User=netscanner
+WorkingDirectory=/opt/netscanner
+Environment="NODE_ENV=production"
+Environment="PORT=5000"
+ExecStart=/usr/bin/node /opt/netscanner/server.js
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -36,16 +36,17 @@ NETWORK_RANGES=192.168.1.0/24
 
 **Save and restart:**
 ```bash
-sudo systemctl restart netscanner
-sudo systemctl restart api
+sudo systemctl restart netlensscan.service
+# Optional scanner service (only if you enabled it):
+sudo systemctl restart netlens.service
 ```
 
 ## ✅ Verify (1 minute)
 
 ```bash
 # Check services are running
-sudo systemctl status netscanner
-sudo systemctl status api
+sudo systemctl status netlens.service
+sudo systemctl status netlensscan.service
 
 # Test API
 curl http://localhost:5000/health
@@ -142,10 +143,10 @@ Open browser and go to the same URL. The interface is mobile-friendly!
 
 ```bash
 # Restart services
-sudo systemctl restart netscanner api
+sudo systemctl restart netlensscan.service netlens.service
 
 # View logs
-sudo journalctl -u netscanner -f
+sudo journalctl -u netlensscan.service -f
 
 # Manual scan
 sudo python3 /opt/netscanner/scanner_service.py
@@ -155,7 +156,7 @@ curl http://localhost:5000/api/devices | jq
 
 # Update network ranges
 sudo nano /opt/netscanner/config.env
-sudo systemctl restart netscanner
+sudo systemctl restart netlensscan.service
 ```
 
 ## 🐛 Troubleshooting
@@ -170,7 +171,7 @@ cat /opt/netscanner/config.env | grep NETWORK_RANGES
 sudo python3 /opt/netscanner/scanner_service.py
 
 # Check MongoDB
-mongo netscanner --eval "db.devices.find().pretty()"
+mongo netlens --eval "db.devices.find().pretty()"
 ```
 
 ### Frontend not loading?
@@ -193,12 +194,12 @@ sudo cp -r build/* /var/www/netscanner/
 
 ```bash
 # Check logs
-sudo journalctl -u netscanner -xe
-sudo journalctl -u api -xe
+sudo journalctl -u netlens.service -xe
+sudo journalctl -u netlensscan.service -xe
 
 # Check permissions
 sudo chown -R root:root /opt/netscanner/scanner_service.py
-sudo chown -R netscanner:netscanner /opt/netscanner
+sudo chown -R netlens:netlens /opt/netscanner
 ```
 
 ## 📊 What Gets Scanned?

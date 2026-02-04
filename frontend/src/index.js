@@ -9,14 +9,46 @@ const darkTheme = createTheme({
   palette: {
     mode: 'dark',
     primary: {
-      main: '#2196f3',
+      main: '#7c3aed',
     },
     secondary: {
-      main: '#f50057',
+      main: '#22c55e',
+    },
+    success: {
+      main: '#22c55e',
     },
     background: {
-      default: '#0a1929',
-      paper: '#132f4c',
+      default: '#050508',
+      paper: '#0b0b12',
+    },
+    text: {
+      primary: '#ffffff',
+      secondary: 'rgba(255,255,255,0.72)',
+    },
+  },
+  components: {
+    MuiAppBar: {
+      styleOverrides: {
+        root: {
+          backgroundImage: 'none',
+          backgroundColor: '#0b0b12',
+        },
+      },
+    },
+    MuiDrawer: {
+      styleOverrides: {
+        paper: {
+          backgroundImage: 'none',
+          backgroundColor: '#0b0b12',
+        },
+      },
+    },
+    MuiPaper: {
+      styleOverrides: {
+        root: {
+          backgroundImage: 'none',
+        },
+      },
     },
   },
 });

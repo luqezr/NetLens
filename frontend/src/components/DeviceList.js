@@ -169,7 +169,7 @@ function DeviceList() {
                     />
                   </TableCell>
                   <TableCell>
-                    {new Date(device.last_seen).toLocaleString()}
+                    {new Date(device.last_seen_on || device.last_seen).toLocaleString()}
                   </TableCell>
                 </TableRow>
               ))}

@@ -6,10 +6,10 @@ Wants=mongod.service mongodb.service
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/netscanner
-EnvironmentFile=-/opt/netscanner/config.env
+WorkingDirectory=/opt/netlens
+EnvironmentFile=-/opt/netlens/config.env
 Environment="PATH=/usr/bin:/usr/local/bin"
-ExecStart=/opt/netscanner/venv/bin/python /opt/netscanner/scanner_service.py
+ExecStart=/opt/netlens/venv/bin/python /opt/netlens/scanner_service.py
 Restart=always
 RestartSec=10
 StandardOutput=journal

@@ -27,29 +27,70 @@ A comprehensive network scanning and monitoring solution that continuously disco
 
 ## 📋 Prerequisites
 
-- Debian/Ubuntu Linux
+- Linux (Debian/Ubuntu-based or Arch Linux-based)
 - Root/sudo access (required for network scanning)
-- MongoDB
+
+NetLens uses these external programs (the installer installs most of them):
+- MongoDB server + shell (mongod + mongosh/mongo)
 - Python 3.8+
 - Node.js 16+
-- nmap, tcpdump
+- npm
+- nmap
+- tcpdump
+- OpenSSL (optional, for generating HTTPS certificate)
 
-## 🚀 Quick Installation (Debian)
+## 🚀 Quick Installation (Debian or Arch)
 
 ```bash
 # Clone repository
 git clone <your-repo>
-cd Network\ Collector
+cd NetLens
 
 # Run installation script (as root)
-sudo bash install.sh
+sudo ./install.sh
 
 # Edit configuration
 sudo nano /opt/netscanner/config.env
 # Update NETWORK_RANGES with your network subnets
 
 # Restart services
-sudo systemctl restart netscanner api
+sudo systemctl restart netlensscan.service netlens.service
+```
+
+Note: the installer installs the systemd units `netlensscan.service` (API) and `netlens.service` (scanner).
+During install, you can choose whether to enable/start them immediately.
+If you run `npm start` in this repo after installing, you will likely see `EADDRINUSE` because the service is already listening.
+
+To run the API manually for development:
+- Stop the service: `sudo systemctl stop netlensscan.service`
+- Or use a different port: `PORT=5001 npm start`
+
+To run the frontend in dev mode:
+```bash
+cd frontend
+npm start
+```
+
+During install you will be prompted for:
+- Distro family (Debian/Ubuntu vs Arch)
+- Whether MongoDB authentication is enabled (and admin credentials if needed)
+- Ports for HTTP/HTTPS and MongoDB (defaults provided)
+- Whether to generate a self-signed OpenSSL certificate for HTTPS
+
+Scanner behavior:
+- Scans are triggered by the API server (via the UI or schedule settings).
+- The installer does **not** start `netlens.service` by default.
+
+Stop everything:
+```bash
+sudo ./scripts/netlens-stop.sh
+# also disable autostart
+sudo ./scripts/netlens-stop.sh --disable
+```
+
+Manage services with a console UI (health + start/stop + logs):
+```bash
+sudo ./scripts/netlens-manager.sh
 ```
 
 ## 📁 Project Structure
@@ -80,8 +121,8 @@ Edit `/opt/netscanner/config.env`:
 
 ```env
 # MongoDB Configuration
-MONGO_URI=mongodb://netscanner:password@localhost:27017/netscanner
-MONGO_DB_NAME=netscanner
+MONGO_URI=mongodb://netlens_app_user:password@localhost:27017/netlens
+MONGO_DB_NAME=netlens
 
 # Network Settings - Update with your network ranges
 NETWORK_RANGES=192.168.1.0/24,10.0.0.0/24
@@ -173,18 +214,21 @@ The frontend will display:
 
 ## 🔒 Security Considerations
 
-1. **Firewall**: Restrict API access to trusted networks
-2. **Authentication**: Add JWT/OAuth authentication to API
-3. **MongoDB**: Change default password
-4. **HTTPS**: Use reverse proxy (nginx) with SSL
-5. **Permissions**: Run scanner as root, API as limited user
+1. **Application login**: NetLens uses session-based authentication.
+   - Default username: `sudo`
+   - Default password: `Sudo123`
+   - Change it immediately after first login via the profile menu in the UI.
+2. **Firewall**: Restrict API access to trusted networks
+3. **MongoDB**: Use authentication and restrict bind addresses in production
+4. **HTTPS**: Use the installer-generated cert for testing, or a real cert in production
+5. **Permissions**: Scanner runs as root (raw sockets), API runs as limited user
 
 ## 🔧 Troubleshooting
 
 ### Check service status
 ```bash
-sudo systemctl status netscanner
-sudo systemctl status api
+sudo systemctl status netlens.service
+sudo systemctl status netlensscan.service
 ```
 
 ### View logs

@@ -53,16 +53,17 @@ NETWORK_RANGES=192.168.1.0/24,10.0.10.0/24,172.16.0.0/16
 ### 4. Restart Services
 
 ```bash
-sudo systemctl restart netscanner
-sudo systemctl restart api
+sudo systemctl restart netlensscan.service
+# Optional scanner service (only if you enabled it):
+sudo systemctl restart netlens.service
 ```
 
 ### 5. Verify Installation
 
 ```bash
 # Check services
-sudo systemctl status netscanner
-sudo systemctl status api
+sudo systemctl status netlens.service
+sudo systemctl status netlensscan.service
 
 # Check API
 curl http://localhost:5000/health
@@ -213,24 +214,24 @@ sudo ufw enable
 
 ```bash
 # Start services
-sudo systemctl start netscanner
-sudo systemctl start api
+sudo systemctl start netlens.service
+sudo systemctl start netlensscan.service
 
 # Stop services
-sudo systemctl stop netscanner
-sudo systemctl stop api
+sudo systemctl stop netlens.service
+sudo systemctl stop netlensscan.service
 
 # Restart services
-sudo systemctl restart netscanner
-sudo systemctl restart api
+sudo systemctl restart netlens.service
+sudo systemctl restart netlensscan.service
 
 # Enable auto-start on boot
-sudo systemctl enable netscanner
-sudo systemctl enable api
+sudo systemctl enable netlens.service
+sudo systemctl enable netlensscan.service
 
 # View logs
-sudo journalctl -u netscanner -f
-sudo journalctl -u api -f
+sudo journalctl -u netlens.service -f
+sudo journalctl -u netlensscan.service -f
 ```
 
 ## 📊 Monitoring
@@ -293,10 +294,10 @@ Use Let's Encrypt (see above) or your own certificates.
 
 ```bash
 # Check logs
-sudo journalctl -u netscanner -xe
+sudo journalctl -u netlens.service -xe
 
 # Verify permissions
-sudo chown -R netscanner:netscanner /opt/netscanner
+sudo chown -R netlens:netlens /opt/netscanner
 
 # Check Python dependencies
 sudo -u root python3 -m pip list
@@ -379,7 +380,7 @@ cd /opt/netscanner
 git pull
 pip3 install -r requirements.txt
 npm install
-sudo systemctl restart netscanner api
+sudo systemctl restart netlensscan.service netlens.service
 ```
 
 ### Update Frontend
@@ -417,13 +418,13 @@ stats = requests.get('http://your-server:5000/api/stats').json()
 ## 📞 Support
 
 - Check logs: `/opt/netscanner/logs/`
-- View system logs: `journalctl -u netscanner`
+- View system logs: `journalctl -u netlensscan.service`
 - MongoDB logs: `/var/log/mongodb/`
 - Nginx logs: `/var/log/nginx/`
 
 ## ✅ Post-Installation Checklist
 
-- [ ] Services running (netscanner, api, mongodb, nginx)
+- [ ] Services running (netlensscan, netlens, mongodb, nginx)
 - [ ] Configuration updated with correct network ranges
 - [ ] Frontend accessible via browser
 - [ ] First scan completed successfully

@@ -5,11 +5,11 @@ Wants=mongod.service mongodb.service
 
 [Service]
 Type=simple
-User=netscanner
-WorkingDirectory=/opt/netscanner
-EnvironmentFile=-/opt/netscanner/config.env
+User=netlens
+WorkingDirectory=/opt/netlens
+EnvironmentFile=-/opt/netlens/config.env
 Environment="NODE_ENV=production"
-ExecStart=/usr/bin/node /opt/netscanner/server.js
+ExecStart=/usr/bin/node /opt/netlens/server.js
 Restart=always
 RestartSec=10
 StandardOutput=journal

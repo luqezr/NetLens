@@ -1,4 +1,5 @@
 from pymongo import MongoClient, ASCENDING, DESCENDING
+from pymongo.errors import DuplicateKeyError
 from datetime import datetime
 from bson import ObjectId
 import os
@@ -7,7 +8,7 @@ class MongoDBManager:
     def __init__(self):
         # Get MongoDB connection from environment
         mongo_uri = os.getenv('MONGO_URI', 'mongodb://localhost:27017/')
-        db_name = os.getenv('MONGO_DB_NAME', 'netscanner')
+        db_name = os.getenv('MONGO_DB_NAME', 'netlens')
         
         self.client = MongoClient(mongo_uri)
         self.db = self.client[db_name]
@@ -24,14 +25,27 @@ class MongoDBManager:
     def _create_indexes(self):
         """Create indexes for better query performance"""
         # Devices
-        self.devices.create_index("ip_address", unique=True)
-        self.devices.create_index("mac_address")
-        self.devices.create_index("status")
-        self.devices.create_index("last_seen")
-        self.devices.create_index([("device_type", ASCENDING), ("status", ASCENDING)])
+        try:
+            self.devices.create_index("ip_address", unique=True)
+        except Exception:
+            pass
+        # Unique MAC when present, but allow many docs without MAC.
+        try:
+            self.devices.create_index("mac_address", unique=True, sparse=True)
+        except Exception:
+            pass
+        for idx in ("status", "last_seen", "last_seen_on", "last_scan_on"):
+            try:
+                self.devices.create_index(idx)
+            except Exception:
+                pass
+        try:
+            self.devices.create_index([("device_type", ASCENDING), ("status", ASCENDING)])
+        except Exception:
+            pass
         
         # Scan history
-        self.scan_history.create_index("started_at", direction=DESCENDING)
+        self.scan_history.create_index([("started_at", DESCENDING)])
         self.scan_history.create_index("scan_id", unique=True)
         
         # Topology
@@ -45,39 +59,66 @@ class MongoDBManager:
     def upsert_device(self, device_data):
         """Insert or update a device"""
         ip_address = device_data.get('ip_address')
-        
-        # Check if device exists
-        existing = self.devices.find_one({"ip_address": ip_address})
-        
+        mac_address = device_data.get('mac_address')
+
+        now = datetime.utcnow()
+        seen_at = device_data.get('last_seen_on') or device_data.get('last_seen') or now
+        scan_at = device_data.get('last_scan_on') or device_data.get('last_scan') or seen_at
+
+        device_data['last_seen'] = seen_at
+        device_data['last_scan'] = scan_at
+        device_data['last_seen_on'] = seen_at
+        device_data['last_scan_on'] = scan_at
+        device_data['status'] = device_data.get('status') or 'online'
+
+        # Prefer stable identity by MAC (IP can change).
+        existing = None
+        if mac_address:
+            existing = self.devices.find_one({"mac_address": mac_address})
+        if not existing and ip_address:
+            existing = self.devices.find_one({"ip_address": ip_address})
+
         if existing:
-            # Update existing device
-            device_data['last_seen'] = datetime.utcnow()
-            device_data['last_scan'] = datetime.utcnow()
-            
-            self.devices.update_one(
-                {"ip_address": ip_address},
-                {"$set": device_data}
-            )
+            # Update existing device by _id to allow IP changes.
+            # If a different doc already occupies the target IP (stale ip-only doc), prefer the MAC identity.
+            if ip_address and existing.get('ip_address') != ip_address:
+                conflict = self.devices.find_one({"ip_address": ip_address, "_id": {"$ne": existing["_id"]}})
+                if conflict and not conflict.get('mac_address'):
+                    try:
+                        self.devices.delete_one({"_id": conflict["_id"]})
+                    except Exception:
+                        pass
+
+            try:
+                self.devices.update_one(
+                    {"_id": existing["_id"]},
+                    {"$set": device_data}
+                )
+            except DuplicateKeyError:
+                # If IP uniqueness conflicts remain, retry without changing ip_address.
+                safe = dict(device_data)
+                safe.pop('ip_address', None)
+                self.devices.update_one({"_id": existing["_id"]}, {"$set": safe})
+
             return existing['_id']
-        else:
-            # Insert new device
-            device_data['first_seen'] = datetime.utcnow()
-            device_data['last_seen'] = datetime.utcnow()
-            device_data['last_scan'] = datetime.utcnow()
-            device_data['status'] = 'online'
-            
-            result = self.devices.insert_one(device_data)
-            
-            # Create alert for new device
-            self.create_alert(
-                device_id=result.inserted_id,
-                alert_type="new_device",
-                severity="medium",
-                title="New device detected",
-                message=f"Device {device_data.get('hostname', ip_address)} joined the network"
-            )
-            
-            return result.inserted_id
+
+        # Insert new device
+        device_data.setdefault('first_seen', now)
+        # Remove null mac_address to avoid duplicate key errors with sparse index
+        if device_data.get('mac_address') is None:
+            device_data.pop('mac_address', None)
+        result = self.devices.insert_one(device_data)
+
+        # Create alert for new device
+        self.create_alert(
+            device_id=result.inserted_id,
+            alert_type="new_device",
+            severity="medium",
+            title="New device detected",
+            message=f"Device {device_data.get('hostname', ip_address)} joined the network"
+        )
+
+        return result.inserted_id
     
     def mark_devices_offline(self, current_ips):
         """Mark devices as offline if not seen in current scan"""

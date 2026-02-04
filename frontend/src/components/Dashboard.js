@@ -1,23 +1,48 @@
 import React, { useState, useEffect } from 'react';
-import { Grid, Paper, Typography, Box, Card, CardContent } from '@mui/material';
+import { Grid, Paper, Typography, Box, Card, CardContent, Button, TextField, Switch, FormControlLabel, Alert, Snackbar, LinearProgress } from '@mui/material';
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import DevicesIcon from '@mui/icons-material/Devices';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import CancelIcon from '@mui/icons-material/Cancel';
 import WarningIcon from '@mui/icons-material/Warning';
-import { getStats } from '../services/api';
+import { getStats, runScanNow, getScanSchedule, setScanSchedule, getScanStatus } from '../services/api';
 
-const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8'];
+const COLORS = ['#7c3aed', '#22c55e', '#a855f7', '#10b981', '#c084fc'];
 
 function Dashboard() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [scanSchedule, setScanScheduleState] = useState({ enabled: true, interval_minutes: 60 });
+  const [scanStatus, setScanStatus] = useState(null);
+  const [scanActionLoading, setScanActionLoading] = useState(false);
+  const [scanScheduleSaving, setScanScheduleSaving] = useState(false);
+  const [scanMessage, setScanMessage] = useState(null);
+  const [scanToastDismissed, setScanToastDismissed] = useState(false);
 
   useEffect(() => {
     fetchStats();
+    fetchScanControls();
     const interval = setInterval(fetchStats, 30000); // Refresh every 30 seconds
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    // Poll scan status more frequently so the UI shows progress.
+    const interval = setInterval(() => {
+      fetchScanControls();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const runningCount = Number(scanStatus?.running_requests ?? 0);
+    const queuedCount = Number(scanStatus?.pending_requests ?? scanStatus?.queued_requests ?? 0);
+    const isActive = Boolean(scanStatus?.running) || runningCount > 0 || queuedCount > 0;
+
+    if (!isActive && scanToastDismissed) {
+      setScanToastDismissed(false);
+    }
+  }, [scanStatus, scanToastDismissed]);
 
   const fetchStats = async () => {
     try {
@@ -27,6 +52,47 @@ function Dashboard() {
     } catch (error) {
       console.error('Error fetching stats:', error);
       setLoading(false);
+    }
+  };
+
+  const fetchScanControls = async () => {
+    try {
+      const [scheduleRes, statusRes] = await Promise.all([getScanSchedule(), getScanStatus()]);
+      setScanScheduleState(scheduleRes.data.data);
+      setScanStatus(statusRes.data.data);
+    } catch (error) {
+      console.error('Error fetching scan controls:', error);
+    }
+  };
+
+  const handleRunScanNow = async () => {
+    try {
+      setScanActionLoading(true);
+      setScanMessage(null);
+      await runScanNow({ requested_by: 'ui' });
+      setScanMessage({ severity: 'success', text: 'Scan requested.' });
+      await fetchScanControls();
+    } catch (error) {
+      setScanMessage({ severity: 'error', text: error?.response?.data?.error || error.message || 'Failed to request scan' });
+    } finally {
+      setScanActionLoading(false);
+    }
+  };
+
+  const handleSaveSchedule = async () => {
+    try {
+      setScanScheduleSaving(true);
+      setScanMessage(null);
+      await setScanSchedule({
+        enabled: Boolean(scanSchedule.enabled),
+        interval_minutes: Number(scanSchedule.interval_minutes) || 60,
+      });
+      setScanMessage({ severity: 'success', text: 'Schedule updated.' });
+      await fetchScanControls();
+    } catch (error) {
+      setScanMessage({ severity: 'error', text: error?.response?.data?.error || error.message || 'Failed to update schedule' });
+    } finally {
+      setScanScheduleSaving(false);
     }
   };
 
@@ -41,16 +107,118 @@ function Dashboard() {
 
   const vendorData = stats?.by_vendor?.slice(0, 10) || [];
 
+  const runningCount = Number(scanStatus?.running_requests ?? 0);
+  const queuedCount = Number(scanStatus?.pending_requests ?? scanStatus?.queued_requests ?? 0);
+  const isActive = Boolean(scanStatus?.running) || runningCount > 0 || queuedCount > 0;
+  const percent = Number(scanStatus?.current_request?.progress_percent);
+  const hasPercent = Number.isFinite(percent) && percent >= 0 && percent <= 100;
+  const scanError = scanStatus?.current_request?.error || null;
+  const scanReason = scanStatus?.current_request?.reason || '';
+  const scanEnvironment = scanStatus?.current_request?.environment || {};
+  
+  // Get network ranges from environment or config
+  const networkRanges = process.env.REACT_APP_NETWORK_RANGES || scanStatus?.current_request?.network_ranges || 'Not specified';
+
   return (
     <Box>
       <Typography variant="h4" gutterBottom>
         Network Overview
       </Typography>
 
+      {scanMessage && (
+        <Box sx={{ mb: 2 }}>
+          <Alert severity={scanMessage.severity} onClose={() => setScanMessage(null)}>
+            {scanMessage.text}
+          </Alert>
+        </Box>
+      )}
+
+      {/* Scan Controls */}
+      <Grid container spacing={3} sx={{ mb: 3 }}>
+        <Grid item xs={12}>
+          <Paper sx={{ p: 2 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 2 }}>
+              <Box>
+                <Typography variant="h6">Scan Controls</Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Last scan: {scanStatus?.latest_scan?.started_at ? new Date(scanStatus.latest_scan.started_at).toLocaleString() : '—'}
+                  {' • '}Queued: {scanStatus?.pending_requests ?? scanStatus?.queued_requests ?? '—'}
+                  {' • '}Running: {scanStatus?.running_requests ?? '—'}
+                </Typography>
+              </Box>
+
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+                <Button variant="contained" onClick={handleRunScanNow} disabled={scanActionLoading}>
+                  Run Scan Now
+                </Button>
+
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={Boolean(scanSchedule.enabled)}
+                      onChange={(e) => setScanScheduleState((s) => ({ ...s, enabled: e.target.checked }))}
+                    />
+                  }
+                  label="Enable schedule"
+                />
+
+                <TextField
+                  label="Interval (minutes)"
+                  type="number"
+                  size="small"
+                  value={scanSchedule.interval_minutes ?? 60}
+                  onChange={(e) => setScanScheduleState((s) => ({ ...s, interval_minutes: e.target.value }))}
+                  inputProps={{ min: 1, max: 1440 }}
+                  sx={{ width: 170 }}
+                />
+
+                <Button variant="outlined" onClick={handleSaveSchedule} disabled={scanScheduleSaving}>
+                  Save Schedule
+                </Button>
+              </Box>
+            </Box>
+          </Paper>
+        </Grid>
+      </Grid>
+
+      {/* Scan toast */}
+      <Snackbar
+        open={isActive && !scanToastDismissed}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+        onClose={() => setScanToastDismissed(true)}
+        message={null}
+      >
+        <Paper sx={{ p: 2, minWidth: 320, maxWidth: 450, border: '1px solid', borderColor: scanError ? 'error.main' : 'divider' }}>
+          <Typography variant="subtitle1" sx={{ color: scanError ? 'error.main' : 'inherit' }}>
+            {scanError ? 'Scan Error' : `Scanning${hasPercent ? ` (${percent}%)` : ''}`}
+          </Typography>
+          {scanError && (
+            <Typography variant="body2" color="error" sx={{ mb: 1 }}>
+              {scanError}
+            </Typography>
+          )}
+          {!scanError && (
+            <>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
+                Running: {runningCount} • Queued: {queuedCount}
+              </Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+                Network: {networkRanges}
+              </Typography>
+            </>
+          )}
+          <LinearProgress 
+            variant={hasPercent ? 'determinate' : 'indeterminate'} 
+            value={hasPercent ? percent : undefined}
+            color={scanError ? 'error' : 'primary'}
+          />
+        </Paper>
+      </Snackbar>
+
       {/* Summary Cards */}
       <Grid container spacing={3} sx={{ mb: 3 }}>
         <Grid item xs={12} sm={6} md={3}>
-          <Card sx={{ background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' }}>
+          <Card sx={{ background: 'linear-gradient(135deg, #4c1d95 0%, #7c3aed 100%)' }}>
             <CardContent>
               <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <Box>
@@ -68,7 +236,7 @@ function Dashboard() {
         </Grid>
 
         <Grid item xs={12} sm={6} md={3}>
-          <Card sx={{ background: 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)' }}>
+          <Card sx={{ background: 'linear-gradient(135deg, #14532d 0%, #22c55e 100%)' }}>
             <CardContent>
               <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <Box>
@@ -86,7 +254,7 @@ function Dashboard() {
         </Grid>
 
         <Grid item xs={12} sm={6} md={3}>
-          <Card sx={{ background: 'linear-gradient(135deg, #ee0979 0%, #ff6a00 100%)' }}>
+          <Card sx={{ background: 'linear-gradient(135deg, #111827 0%, #ef4444 100%)' }}>
             <CardContent>
               <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <Box>
@@ -104,7 +272,7 @@ function Dashboard() {
         </Grid>
 
         <Grid item xs={12} sm={6} md={3}>
-          <Card sx={{ background: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)' }}>
+          <Card sx={{ background: 'linear-gradient(135deg, #312e81 0%, #a855f7 100%)' }}>
             <CardContent>
               <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <Box>
@@ -163,7 +331,7 @@ function Dashboard() {
                 <YAxis />
                 <Tooltip />
                 <Legend />
-                <Bar dataKey="count" fill="#2196f3" name="Devices" />
+                <Bar dataKey="count" fill="#7c3aed" name="Devices" />
               </BarChart>
             </ResponsiveContainer>
           </Paper>

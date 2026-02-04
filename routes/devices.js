@@ -20,7 +20,7 @@ router.get('/', async (req, res) => {
     }
     
     const devices = await Device.find(query)
-      .sort({ last_seen: -1 })
+      .sort({ last_seen_on: -1, last_seen: -1 })
       .limit(1000);
     
     res.json({

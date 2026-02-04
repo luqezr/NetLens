@@ -36,6 +36,9 @@ const DeviceSchema = new mongoose.Schema({
   first_seen: { type: Date, default: Date.now },
   last_seen: { type: Date, default: Date.now },
   last_scan: { type: Date, default: Date.now },
+  // Preferred naming for UI/API consumers (kept alongside last_seen/last_scan for back-compat)
+  last_seen_on: { type: Date },
+  last_scan_on: { type: Date },
   uptime_seconds: Number,
   response_time_ms: Number,
   security: {

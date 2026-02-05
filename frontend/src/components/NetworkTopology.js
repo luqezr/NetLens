@@ -10,10 +10,12 @@ import ReactFlow, {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { getTopology } from '../services/api';
+import DeviceDetailDialog from './DeviceDetailDialog';
 
 const nodeColors = {
   router: '#e74c3c',
   switch: '#3498db',
+  server: '#64748b',
   windows_pc: '#9b59b6',
   linux_pc: '#27ae60',
   mac: '#34495e',
@@ -27,11 +29,171 @@ const edgeColors = {
   lan: '#64748b',
 };
 
+function isValidIpv4(ip) {
+  if (!ip || typeof ip !== 'string') return false;
+  if (ip.includes('/')) return false;
+  const m = ip.match(/^([0-9]{1,3}\.){3}[0-9]{1,3}$/);
+  if (!m) return false;
+  const parts = ip.split('.').map((p) => Number(p));
+  return parts.length === 4 && parts.every((n) => Number.isFinite(n) && n >= 0 && n <= 255);
+}
+
+function computeHierarchyPositions(nodeData, edgeData) {
+  const byId = new Map((nodeData || []).map((n) => [n.id, n]));
+  const incoming = new Map();
+  const outgoing = new Map();
+  for (const e of edgeData || []) {
+    if (!incoming.has(e.target)) incoming.set(e.target, []);
+    if (!outgoing.has(e.source)) outgoing.set(e.source, []);
+    incoming.get(e.target).push(e.source);
+    outgoing.get(e.source).push(e.target);
+  }
+
+  const routers = (nodeData || []).filter((n) => n.type === 'router');
+  const switches = (nodeData || []).filter((n) => n.type === 'switch');
+  const devices = (nodeData || []).filter((n) => n.type !== 'router' && n.type !== 'switch');
+
+  const nodeWidth = 220;
+  const xGap = 80;
+  const yGap = 190;
+
+  const routerY = 0;
+  const switchY = routerY + yGap;
+  const deviceY = switchY + yGap;
+
+  // Determine parent router for each switch (incoming edge from a router)
+  const switchToRouter = new Map();
+  for (const sw of switches) {
+    const srcs = incoming.get(sw.id) || [];
+    const routerSrc = srcs.find((s) => byId.get(s)?.type === 'router');
+    if (routerSrc) switchToRouter.set(sw.id, routerSrc);
+  }
+
+  // Determine parent switch for each device (incoming edge from a switch)
+  const deviceToSwitch = new Map();
+  for (const d of devices) {
+    const srcs = incoming.get(d.id) || [];
+    const swSrc = srcs.find((s) => byId.get(s)?.type === 'switch');
+    if (swSrc) deviceToSwitch.set(d.id, swSrc);
+  }
+
+  // If there's exactly one switch, attach orphan devices to it.
+  if (switches.length === 1) {
+    for (const d of devices) {
+      if (!deviceToSwitch.has(d.id)) deviceToSwitch.set(d.id, switches[0].id);
+    }
+  }
+
+  // Group switches under routers.
+  const routerIds = routers.map((r) => r.id);
+  const routerToSwitches = new Map(routerIds.map((id) => [id, []]));
+  for (const sw of switches) {
+    const rId = switchToRouter.get(sw.id) || (routers[0]?.id ?? null);
+    if (rId) {
+      if (!routerToSwitches.has(rId)) routerToSwitches.set(rId, []);
+      routerToSwitches.get(rId).push(sw.id);
+    }
+  }
+
+  const positions = {};
+
+  // Place routers in a row.
+  const routerRow = routers.length > 0 ? routers : (switches.length > 0 ? [] : devices);
+  const routerCount = routerRow.length || 1;
+  const routerRowWidth = routerCount * nodeWidth + (routerCount - 1) * xGap;
+
+  for (let i = 0; i < routerRow.length; i += 1) {
+    const n = routerRow[i];
+    const x = -routerRowWidth / 2 + i * (nodeWidth + xGap);
+    const y = n.type === 'router' ? routerY : routerY;
+    positions[n.id] = { x, y };
+  }
+
+  // Place switches under their router.
+  for (const r of routers) {
+    const swIds = routerToSwitches.get(r.id) || [];
+    if (swIds.length === 0) continue;
+    const rPos = positions[r.id] || { x: 0, y: routerY };
+    const width = swIds.length * nodeWidth + (swIds.length - 1) * xGap;
+    for (let i = 0; i < swIds.length; i += 1) {
+      const swId = swIds[i];
+      const x = rPos.x - width / 2 + i * (nodeWidth + xGap);
+      positions[swId] = { x, y: switchY };
+    }
+  }
+
+  // Place switches not assigned to routers.
+  const unplacedSwitches = switches.filter((s) => !positions[s.id]);
+  if (unplacedSwitches.length > 0) {
+    const width = unplacedSwitches.length * nodeWidth + (unplacedSwitches.length - 1) * xGap;
+    for (let i = 0; i < unplacedSwitches.length; i += 1) {
+      const sw = unplacedSwitches[i];
+      positions[sw.id] = { x: -width / 2 + i * (nodeWidth + xGap), y: switchY };
+    }
+  }
+
+  // Group devices under switches.
+  const switchToDevices = new Map(switches.map((s) => [s.id, []]));
+  for (const d of devices) {
+    const swId = deviceToSwitch.get(d.id);
+    if (swId) {
+      if (!switchToDevices.has(swId)) switchToDevices.set(swId, []);
+      switchToDevices.get(swId).push(d.id);
+    }
+  }
+
+  // Place devices under each switch.
+  for (const sw of switches) {
+    const devIds = switchToDevices.get(sw.id) || [];
+    if (devIds.length === 0) continue;
+    const swPos = positions[sw.id] || { x: 0, y: switchY };
+    const cols = Math.min(4, Math.max(1, devIds.length));
+    const rowWidth = cols * nodeWidth + (cols - 1) * xGap;
+    for (let idx = 0; idx < devIds.length; idx += 1) {
+      const col = idx % cols;
+      const row = Math.floor(idx / cols);
+      const x = swPos.x - rowWidth / 2 + col * (nodeWidth + xGap);
+      const y = deviceY + row * (yGap * 0.9);
+      positions[devIds[idx]] = { x, y };
+    }
+  }
+
+  // Place orphan devices if any.
+  const orphanDevices = devices.filter((d) => !positions[d.id]);
+  if (orphanDevices.length > 0) {
+    const width = orphanDevices.length * nodeWidth + (orphanDevices.length - 1) * xGap;
+    for (let i = 0; i < orphanDevices.length; i += 1) {
+      positions[orphanDevices[i].id] = { x: -width / 2 + i * (nodeWidth + xGap), y: deviceY };
+    }
+  }
+
+  // Place any remaining nodes (defensive).
+  for (const n of nodeData || []) {
+    if (!positions[n.id]) positions[n.id] = { x: 0, y: deviceY };
+  }
+
+  return positions;
+}
+
 function NetworkTopology() {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState({ nodes: 0, edges: 0 });
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [selectedDeviceIp, setSelectedDeviceIp] = useState(null);
+
+  const closeDetails = useCallback(() => {
+    setDetailOpen(false);
+    setSelectedDeviceIp(null);
+  }, []);
+
+  const onNodeClick = useCallback((_, node) => {
+    const ip = node?.data?.ip;
+    if (!isValidIpv4(ip)) return;
+    setSelectedDeviceIp(ip);
+    setDetailOpen(true);
+  }, []);
 
   const fetchTopology = useCallback(async () => {
     try {
@@ -39,14 +201,18 @@ function NetworkTopology() {
       const response = await getTopology();
       const { nodes: nodeData, edges: edgeData } = response.data.data;
 
+      const positions = computeHierarchyPositions(nodeData, edgeData);
+
       // Transform nodes for React Flow
-      const flowNodes = nodeData.map((node, index) => ({
+      const flowNodes = nodeData.map((node) => ({
         id: node.id,
         type: 'default',
         data: {
+          ip: node.ip,
+          type: node.type,
           label: (
-            <Box sx={{ textAlign: 'center', p: 1 }}>
-              <Typography variant="caption" fontWeight="bold">
+            <Box sx={{ textAlign: 'center', p: 1, cursor: isValidIpv4(node.ip) ? 'pointer' : 'default' }}>
+              <Typography variant="caption" fontWeight="bold" sx={{ textDecoration: isValidIpv4(node.ip) ? 'underline' : 'none' }}>
                 {node.label}
               </Typography>
               <br />
@@ -66,10 +232,7 @@ function NetworkTopology() {
             </Box>
           ),
         },
-        position: {
-          x: (index % 5) * 250,
-          y: Math.floor(index / 5) * 200,
-        },
+        position: positions[node.id] || { x: 0, y: 0 },
         style: {
           background: nodeColors[node.type] || nodeColors.unknown,
           color: 'white',
@@ -146,6 +309,7 @@ function NetworkTopology() {
             edges={edges}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
+            onNodeClick={onNodeClick}
             fitView
             attributionPosition="bottom-left"
           >
@@ -153,15 +317,19 @@ function NetworkTopology() {
             <Controls />
             <MiniMap
               nodeColor={(node) => {
-                const type = node.data.label.props.children.find(
-                  (child) => child.type === Chip
-                )?.props.label;
+                const type = node?.data?.type;
                 return nodeColors[type] || nodeColors.unknown;
               }}
             />
           </ReactFlow>
         )}
       </Paper>
+
+      <DeviceDetailDialog
+        open={detailOpen}
+        onClose={closeDetails}
+        deviceIp={selectedDeviceIp}
+      />
 
       <Paper sx={{ mt: 2, p: 2 }}>
         <Typography variant="h6" gutterBottom>

@@ -18,6 +18,7 @@ import {
   TableHead,
   TableRow,
   TablePagination,
+  TableSortLabel,
   CircularProgress,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
@@ -82,6 +83,8 @@ function DeviceList() {
   const [rowsPerPage, setRowsPerPage] = useState(25);
   const [detailOpen, setDetailOpen] = useState(false);
   const [selectedDeviceIp, setSelectedDeviceIp] = useState(null);
+  const [order, setOrder] = useState('asc');
+  const [orderBy, setOrderBy] = useState('device');
 
   const fetchDevices = useCallback(async () => {
     try {
@@ -129,6 +132,201 @@ function DeviceList() {
     device.vendor?.toLowerCase().includes(search.toLowerCase())
   );
 
+  const columns = [
+    {
+      id: 'device',
+      label: 'Device',
+      type: 'string',
+      getValue: (d) => d?.hostname || d?.ip_address || '',
+      render: (device) => (
+        <>
+          <Button
+            variant="text"
+            onClick={() => openDeviceDetails(device)}
+            sx={{
+              textTransform: 'none',
+              px: 0,
+              justifyContent: 'flex-start',
+              minWidth: 0,
+              fontWeight: 700,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {device.hostname || device.ip_address}
+          </Button>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+            {device.connection_method || device.connection?.type || (typeof device.connection === 'string' ? device.connection : 'Unknown')}
+          </Typography>
+        </>
+      ),
+    },
+    {
+      id: 'ip_address',
+      label: 'IP Address',
+      type: 'string',
+      getValue: (d) => d?.ip_address || '',
+      render: (device) => (
+        <Typography variant="body2" sx={{ fontFamily: 'monospace', whiteSpace: 'nowrap' }}>
+          {device.ip_address || '-'}
+        </Typography>
+      ),
+    },
+    {
+      id: 'mac_address',
+      label: 'MAC',
+      type: 'string',
+      getValue: (d) => d?.mac_address || '',
+      render: (device) => (
+        <Typography variant="body2" sx={{ fontFamily: 'monospace', whiteSpace: 'nowrap' }}>
+          {device.mac_address || '-'}
+        </Typography>
+      ),
+    },
+    {
+      id: 'vendor',
+      label: 'Vendor',
+      type: 'string',
+      getValue: (d) => d?.vendor || '',
+      render: (device) => device.vendor || '-',
+    },
+    {
+      id: 'device_type',
+      label: 'Type',
+      type: 'string',
+      getValue: (d) => d?.device_type || '',
+      render: (device) => (
+        <Chip label={device.device_type || 'Unknown'} size="small" variant="outlined" sx={{ whiteSpace: 'nowrap' }} />
+      ),
+    },
+    {
+      id: 'connection',
+      label: 'Connection',
+      type: 'string',
+      getValue: (d) => d?.connection_method || d?.connection?.type || (typeof d?.connection === 'string' ? d.connection : ''),
+      render: (device) => (
+        <Chip
+          label={device.connection_method || device.connection?.type || (typeof device.connection === 'string' ? device.connection : 'Unknown')}
+          size="small"
+          color={getConnectionColor(device.connection_method || device.connection?.type || (typeof device.connection === 'string' ? device.connection : undefined))}
+          variant="outlined"
+          sx={{ whiteSpace: 'nowrap' }}
+        />
+      ),
+    },
+    {
+      id: 'os',
+      label: 'OS',
+      type: 'string',
+      getValue: (d) => getOsLabel(d),
+      render: (device) => getOsLabel(device),
+    },
+    {
+      id: 'os_version',
+      label: 'OS Version',
+      type: 'string',
+      getValue: (d) => getOsVersionLabel(d),
+      render: (device) => getOsVersionLabel(device),
+    },
+    {
+      id: 'ports',
+      label: 'Ports',
+      type: 'string',
+      getValue: (d) => formatPorts(d, 999),
+      render: (device) => (
+        <Typography variant="body2" sx={{ fontFamily: 'monospace', whiteSpace: 'nowrap' }}>
+          {formatPorts(device)}
+        </Typography>
+      ),
+    },
+    {
+      id: 'open_ports_count',
+      label: 'Open',
+      type: 'number',
+      align: 'right',
+      getValue: (d) => getOpenPortsCount(d),
+      render: (device) => (getOpenPortsCount(device) ?? '—'),
+    },
+    {
+      id: 'status',
+      label: 'Status',
+      type: 'string',
+      getValue: (d) => d?.status || '',
+      render: (device) => (
+        <Chip
+          label={device.status}
+          size="small"
+          color={device.status === 'online' ? 'success' : 'error'}
+          sx={{ whiteSpace: 'nowrap' }}
+        />
+      ),
+    },
+    {
+      id: 'first_seen',
+      label: 'First Seen',
+      type: 'date',
+      getValue: (d) => d?.first_seen,
+      render: (device) => formatDate(device.first_seen),
+    },
+    {
+      id: 'last_seen',
+      label: 'Last Seen',
+      type: 'date',
+      getValue: (d) => d?.last_seen_on || d?.last_seen,
+      render: (device) => formatDate(device.last_seen_on || device.last_seen),
+    },
+    {
+      id: 'last_scan',
+      label: 'Last Scan',
+      type: 'date',
+      getValue: (d) => d?.last_scan_on || d?.last_scan,
+      render: (device) => formatDate(device.last_scan_on || device.last_scan),
+    },
+  ];
+
+  function normalizeSortValue(value, type) {
+    if (type === 'number') {
+      const n = Number(value);
+      return Number.isFinite(n) ? n : -Infinity;
+    }
+    if (type === 'date') {
+      const t = new Date(value).getTime();
+      return Number.isFinite(t) ? t : 0;
+    }
+    if (value === null || value === undefined) return '';
+    return String(value).toLowerCase();
+  }
+
+  function getComparator(orderDirection, sortKey) {
+    const col = columns.find((c) => c.id === sortKey) || columns[0];
+    const dir = orderDirection === 'desc' ? -1 : 1;
+    return (a, b) => {
+      const av = normalizeSortValue(col.getValue(a), col.type);
+      const bv = normalizeSortValue(col.getValue(b), col.type);
+      if (av < bv) return -1 * dir;
+      if (av > bv) return 1 * dir;
+      return 0;
+    };
+  }
+
+  function stableSort(array, comparator) {
+    const stabilized = array.map((el, index) => [el, index]);
+    stabilized.sort((a, b) => {
+      const orderCmp = comparator(a[0], b[0]);
+      if (orderCmp !== 0) return orderCmp;
+      return a[1] - b[1];
+    });
+    return stabilized.map((el) => el[0]);
+  }
+
+  const sortedDevices = stableSort(filteredDevices, getComparator(order, orderBy));
+
+  const handleRequestSort = (property) => {
+    const isAsc = orderBy === property && order === 'asc';
+    setOrder(isAsc ? 'desc' : 'asc');
+    setOrderBy(property);
+    setPage(0);
+  };
+
   const openDeviceDetails = (device) => {
     const ip = device?.ip_address;
     if (!ip) return;
@@ -137,8 +335,8 @@ function DeviceList() {
   };
 
   return (
-    <Box>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+    <Box sx={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flex: '0 0 auto' }}>
         <Typography variant="h4">
           Devices ({filteredDevices.length})
         </Typography>
@@ -147,7 +345,7 @@ function DeviceList() {
         </IconButton>
       </Box>
 
-      <Paper sx={{ p: 2, mb: 2 }}>
+      <Paper sx={{ p: 2, mb: 2, flex: '0 0 auto' }}>
         <Box sx={{ display: 'flex', gap: 2 }}>
           <TextField
             placeholder="Search IP, hostname, vendor..."
@@ -175,126 +373,64 @@ function DeviceList() {
         </Box>
       </Paper>
 
-      <TableContainer component={Paper}>
-        <Table size="small" stickyHeader sx={{ minWidth: 900 }}>
-          <TableHead>
-            <TableRow>
-              <TableCell>Device</TableCell>
-              <TableCell>IP Address</TableCell>
-              <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>MAC</TableCell>
-              <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>Vendor</TableCell>
-              <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>Type</TableCell>
-              <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>Connection</TableCell>
-              <TableCell sx={{ display: { xs: 'none', lg: 'table-cell' } }}>OS</TableCell>
-              <TableCell sx={{ display: { xs: 'none', xl: 'table-cell' } }}>OS Version</TableCell>
-              <TableCell sx={{ display: { xs: 'none', lg: 'table-cell' } }}>Ports</TableCell>
-              <TableCell align="right">Open</TableCell>
-              <TableCell>Status</TableCell>
-              <TableCell sx={{ display: { xs: 'none', lg: 'table-cell' } }}>First Seen</TableCell>
-              <TableCell>Last Seen</TableCell>
-              <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>Last Scan</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {loading && (
+      <Paper sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        <TableContainer sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+          <Table size="small" stickyHeader sx={{ minWidth: 1400 }}>
+            <TableHead>
               <TableRow>
-                <TableCell colSpan={13}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                    <CircularProgress size={18} />
-                    <Typography variant="body2" color="text.secondary">Loading devices…</Typography>
-                  </Box>
-                </TableCell>
-              </TableRow>
-            )}
-
-            {!loading && filteredDevices
-              .slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage)
-              .map((device) => (
-                <TableRow key={device._id} hover>
-                  <TableCell>
-                    <Button
-                      variant="text"
-                      onClick={() => openDeviceDetails(device)}
-                      sx={{
-                        textTransform: 'none',
-                        px: 0,
-                        justifyContent: 'flex-start',
-                        minWidth: 0,
-                        fontWeight: 700,
-                      }}
+                {columns.map((col) => (
+                  <TableCell
+                    key={col.id}
+                    align={col.align || 'left'}
+                    sortDirection={orderBy === col.id ? order : false}
+                    sx={{ whiteSpace: 'nowrap' }}
+                  >
+                    <TableSortLabel
+                      active={orderBy === col.id}
+                      direction={orderBy === col.id ? order : 'asc'}
+                      onClick={() => handleRequestSort(col.id)}
                     >
-                      {device.hostname || device.ip_address}
-                    </Button>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: { xs: 'block', md: 'none' } }}>
-                      {device.connection_method || device.connection?.type || (typeof device.connection === 'string' ? device.connection : 'Unknown')}
-                    </Typography>
+                      {col.label}
+                    </TableSortLabel>
                   </TableCell>
-                  <TableCell>
-                    <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
-                      {device.ip_address || '-'}
-                    </Typography>
-                  </TableCell>
-                  <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>
-                    <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
-                      {device.mac_address || '-'}
-                    </Typography>
-                  </TableCell>
-                  <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>{device.vendor || '-'}</TableCell>
-                  <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>
-                    <Chip
-                      label={device.device_type || 'Unknown'}
-                      size="small"
-                      variant="outlined"
-                    />
-                  </TableCell>
-                  <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>
-                    <Chip
-                      label={device.connection_method || device.connection?.type || (typeof device.connection === 'string' ? device.connection : 'Unknown')}
-                      size="small"
-                      color={getConnectionColor(device.connection_method || device.connection?.type || (typeof device.connection === 'string' ? device.connection : undefined))}
-                      variant="outlined"
-                    />
-                  </TableCell>
-                  <TableCell sx={{ display: { xs: 'none', lg: 'table-cell' } }}>
-                    {getOsLabel(device)}
-                  </TableCell>
-                  <TableCell sx={{ display: { xs: 'none', xl: 'table-cell' } }}>
-                    {getOsVersionLabel(device)}
-                  </TableCell>
-                  <TableCell sx={{ display: { xs: 'none', lg: 'table-cell' }, fontFamily: 'monospace' }}>
-                    {formatPorts(device)}
-                  </TableCell>
-                  <TableCell align="right">
-                    {getOpenPortsCount(device) ?? '—'}
-                  </TableCell>
-                  <TableCell>
-                    <Chip
-                      label={device.status}
-                      size="small"
-                      color={device.status === 'online' ? 'success' : 'error'}
-                    />
-                  </TableCell>
-                  <TableCell sx={{ display: { xs: 'none', lg: 'table-cell' } }}>
-                    {formatDate(device.first_seen)}
-                  </TableCell>
-                  <TableCell>
-                    {formatDate(device.last_seen_on || device.last_seen)}
-                  </TableCell>
-                  <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>
-                    {formatDate(device.last_scan_on || device.last_scan)}
+                ))}
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {loading && (
+                <TableRow>
+                  <TableCell colSpan={columns.length}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <CircularProgress size={18} />
+                      <Typography variant="body2" color="text.secondary">Loading devices…</Typography>
+                    </Box>
                   </TableCell>
                 </TableRow>
-              ))}
+              )}
 
-            {!loading && filteredDevices.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={13}>
-                  <Typography variant="body2" color="text.secondary">No devices found.</Typography>
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
+              {!loading && sortedDevices
+                .slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage)
+                .map((device) => (
+                  <TableRow key={device._id} hover>
+                    {columns.map((col) => (
+                      <TableCell key={col.id} align={col.align || 'left'} sx={{ whiteSpace: 'nowrap' }}>
+                        {col.render(device)}
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                ))}
+
+              {!loading && filteredDevices.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={columns.length}>
+                    <Typography variant="body2" color="text.secondary">No devices found.</Typography>
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </TableContainer>
+
         <TablePagination
           rowsPerPageOptions={[10, 25, 50, 100]}
           component="div"
@@ -303,8 +439,9 @@ function DeviceList() {
           page={page}
           onPageChange={handleChangePage}
           onRowsPerPageChange={handleChangeRowsPerPage}
+          sx={{ flex: '0 0 auto' }}
         />
-      </TableContainer>
+      </Paper>
 
       <DeviceDetailDialog
         open={detailOpen}

@@ -5,6 +5,42 @@
 
 set -euo pipefail
 
+# --- UI helpers ---
+if [ -t 1 ]; then
+    CLR_RESET="\033[0m"
+    CLR_RED="\033[31m"
+    CLR_GREEN="\033[32m"
+    CLR_YELLOW="\033[33m"
+    CLR_BLUE="\033[34m"
+    CLR_PURPLE="\033[35m"
+    CLR_BOLD="\033[1m"
+else
+    CLR_RESET=""
+    CLR_RED=""
+    CLR_GREEN=""
+    CLR_YELLOW=""
+    CLR_BLUE=""
+    CLR_PURPLE=""
+    CLR_BOLD=""
+fi
+
+banner() {
+    echo -e "${CLR_PURPLE}${CLR_BOLD}"
+    cat <<'EOF'
+ _   _      _   _                    
+| \ | | ___| |_| |    ___ _ __  ___  
+|  \| |/ _ \ __| |   / _ \ '_ \/ __| 
+| |\  |  __/ |_| |__|  __/ | | \__ \ 
+|_| \_|\___|\__|_____\___|_| |_|___/ 
+EOF
+    echo -e "${CLR_RESET}"
+}
+
+log_info() { echo -e "${CLR_BLUE}INFO${CLR_RESET}: $*"; }
+log_ok() { echo -e "${CLR_GREEN}OK${CLR_RESET}: $*"; }
+log_warn() { echo -e "${CLR_YELLOW}WARN${CLR_RESET}: $*"; }
+log_err() { echo -e "${CLR_RED}ERROR${CLR_RESET}: $*"; }
+
 prompt_yes_no() {
     local prompt="$1"
     local default_answer="${2:-}"
@@ -20,6 +56,9 @@ prompt_yes_no() {
         else
             read -r -p "$prompt [y/n]: " answer
         fi
+
+        # Normalize input (trim whitespace, lower-case)
+        answer="$(echo "$answer" | tr -d '[:space:]')"
 
         case "${answer,,}" in
             y|yes) return 0 ;;
@@ -117,9 +156,10 @@ try_install_mongodb() {
     return 1
 }
 
-echo "====================================="
-echo "NetLens Installation"
-echo "====================================="
+banner
+echo -e "${CLR_BOLD}=====================================${CLR_RESET}"
+echo -e "${CLR_BOLD}NetLens Installation${CLR_RESET}"
+echo -e "${CLR_BOLD}=====================================${CLR_RESET}"
 
 preflight_check() {
     local missing=()
@@ -141,9 +181,9 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-echo "Select your Linux distribution family:"
-echo "1) Debian/Ubuntu-based (apt)"
-echo "2) Arch Linux-based (pacman)"
+    echo "Select your Linux distribution family:"
+    echo "1) Debian/Ubuntu-based (apt)"
+    echo "2) Arch Linux-based (pacman)"
 read -r -p "Enter choice [1]: " DISTRO_CHOICE
 DISTRO_CHOICE="${DISTRO_CHOICE:-1}"
 
@@ -152,13 +192,13 @@ if [[ "$DISTRO_CHOICE" == "2" ]]; then
     PKG_MGR="pacman"
 fi
 
-echo "Updating system packages..."
+log_info "Updating system packages..."
 if [[ "$PKG_MGR" == "apt" ]]; then
     apt-get update
     if prompt_yes_no "Run full system upgrade (apt-get upgrade)?" "y"; then
         apt-get upgrade -y
     else
-        echo "Skipping system upgrade."
+        log_info "Skipping system upgrade."
     fi
 else
     if ! command -v pacman >/dev/null 2>&1; then
@@ -168,12 +208,12 @@ else
     if prompt_yes_no "Run full system upgrade (pacman -Syu)?" "y"; then
         pacman -Syu --noconfirm
     else
-        echo "Skipping system upgrade; syncing package databases only (pacman -Sy)."
+        log_info "Skipping system upgrade; syncing package databases only (pacman -Sy)."
         pacman -Sy --noconfirm
     fi
 fi
 
-echo "Installing OS dependencies..."
+log_info "Installing OS dependencies..."
 if [[ "$PKG_MGR" == "apt" ]]; then
     apt-get install -y \
         python3 \
@@ -202,7 +242,7 @@ else
     pacman -S --noconfirm --needed mongodb mongosh >/dev/null 2>&1 || true
 fi
 
-echo "Verifying installed dependencies..."
+log_info "Verifying installed dependencies..."
 missing_deps=()
 PYTHON_BIN="$(detect_python_bin || true)"
 PIP_BIN="$(detect_pip_bin || true)"
@@ -688,7 +728,7 @@ else
 fi
 
 # Install systemd services
-echo "Installing systemd services..."
+log_info "Installing systemd services..."
 cp /opt/netlens/netlens.service /etc/systemd/system/
 cp /opt/netlens/netlensscan.service /etc/systemd/system/
 
@@ -701,7 +741,7 @@ systemctl disable api.service 2>/dev/null || true
 systemctl stop netLens.service 2>/dev/null || true
 systemctl disable netLens.service 2>/dev/null || true
 
-echo "Systemd units installed: netlensscan.service (API), netlens.service (scanner)"
+log_ok "Systemd units installed: netlensscan.service (API), netlens.service (scanner)"
 
 ENABLE_NOW="no"
 if prompt_yes_no "Enable and start NetLens services now?" "y"; then
@@ -712,7 +752,7 @@ if prompt_yes_no "Enable and start NetLens services now?" "y"; then
         systemctl start netlensscan.service
 
         # Scanner service is optional (scans are usually orchestrated by the API server)
-        if prompt_yes_no "Enable and start scanner service (netlens.service)?" "n"; then
+        if prompt_yes_no "Enable and start scanner service (netlens.service)?" "y"; then
                 echo "Enabling + starting scanner service (netlens.service)..."
                 systemctl enable netlens.service
                 systemctl start netlens.service

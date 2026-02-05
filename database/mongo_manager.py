@@ -30,10 +30,21 @@ class MongoDBManager:
         except Exception:
             pass
         # Unique MAC when present, but allow many docs without MAC.
+        # NOTE: sparse=True still indexes explicit nulls; prefer partial index so null/empty values are ignored.
         try:
-            self.devices.create_index("mac_address", unique=True, sparse=True)
+            self.devices.create_index(
+                "mac_address",
+                unique=True,
+                partialFilterExpression={
+                    "mac_address": {"$type": "string", "$ne": ""}
+                },
+            )
         except Exception:
-            pass
+            # Fallback for older MongoDB versions
+            try:
+                self.devices.create_index("mac_address", unique=True, sparse=True)
+            except Exception:
+                pass
         for idx in ("status", "last_seen", "last_seen_on", "last_scan_on"):
             try:
                 self.devices.create_index(idx)
@@ -58,6 +69,12 @@ class MongoDBManager:
     
     def upsert_device(self, device_data):
         """Insert or update a device"""
+        # Never persist null/empty MACs; they break unique indexes and aren't useful.
+        if device_data.get('mac_address') in (None, '', '-', '—'):
+            device_data.pop('mac_address', None)
+        if device_data.get('hostname') in (None, '', '-', '—'):
+            device_data.pop('hostname', None)
+
         ip_address = device_data.get('ip_address')
         mac_address = device_data.get('mac_address')
 
@@ -98,14 +115,17 @@ class MongoDBManager:
                 # If IP uniqueness conflicts remain, retry without changing ip_address.
                 safe = dict(device_data)
                 safe.pop('ip_address', None)
+                # Also avoid forcing a null/empty mac into a unique index.
+                if safe.get('mac_address') in (None, '', '-', '—'):
+                    safe.pop('mac_address', None)
                 self.devices.update_one({"_id": existing["_id"]}, {"$set": safe})
 
             return existing['_id']
 
         # Insert new device
         device_data.setdefault('first_seen', now)
-        # Remove null mac_address to avoid duplicate key errors with sparse index
-        if device_data.get('mac_address') is None:
+        # Remove null/empty mac_address to avoid duplicate key errors
+        if device_data.get('mac_address') in (None, '', '-', '—'):
             device_data.pop('mac_address', None)
         result = self.devices.insert_one(device_data)
 

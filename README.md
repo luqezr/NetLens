@@ -225,6 +225,65 @@ The frontend will display:
 
 ## 🔧 Troubleshooting
 
+### Scans miss devices / only a few hosts discovered
+
+This almost always happens when scans are executed **without root privileges**.
+
+- **Full device discovery (especially MAC/vendor via ARP) requires root.**
+- If the API service (`netlensscan.service`) runs as user `netlens` and executes scans itself, Nmap host discovery will rely on ICMP/TCP probes and can miss devices that don't respond.
+
+Recommended fix (production): run the dedicated scanner service (root) and let it pick up queued scan requests:
+
+```bash
+sudo systemctl enable --now netlens.service
+sudo systemctl restart netlensscan.service
+```
+
+NetLens uses a MongoDB queue (`scan_requests`). When `netlens.service` is running, the API will detect it (via a heartbeat) and **will not run scans inside the API process**.
+
+Optional discovery tuning (in `/opt/netlens/config.env`):
+
+```env
+# Host discovery tuning
+DISCOVERY_HOST_TIMEOUT=8s
+DISCOVERY_MAX_RETRIES=2
+DISCOVERY_TCP_PORTS=22,80,443,445,3389
+
+# Optional: add a real ICMP ping sweep using the system `ping` command.
+# This can discover devices that don't answer TCP probes. Useful when scans run unprivileged.
+DISCOVERY_PING_SWEEP=auto   # auto|true|false (auto enables only when not root)
+DISCOVERY_PING_TIMEOUT_MS=1000
+DISCOVERY_PING_CONCURRENCY=128
+DISCOVERY_PING_MAX_HOSTS=2048
+
+# Optional fallback (can be slower): if discovery finds fewer than N hosts,
+# do a full sweep assuming hosts are up (use with care).
+DISCOVERY_MIN_HOSTS=10
+DISCOVERY_FALLBACK_FULL_SWEEP=false
+DISCOVERY_FALLBACK_MAX_HOSTS=256
+```
+
+Note: it's possible for a device to respond to `ping <ip>` from your laptop, but still be missed by Nmap discovery if the scan is running as a different user/service without raw-socket privileges (ICMP/ARP limitations) and the device doesn't respond to the configured TCP ping ports.
+
+### Scan crashes with DuplicateKeyError on mac_address
+
+If you see `E11000 duplicate key error ... mac_address: null`, your DB has a MAC unique index that is indexing `null` values.
+Run the repair script once:
+
+```bash
+sudo /opt/netlens/venv/bin/python /opt/netlens/scripts/fix_database.py
+```
+
+### Scanner log Permission denied
+
+If you see `PermissionError: ... /opt/netlens/logs/scanner.log`, either:
+
+- Fix permissions:
+   ```bash
+   sudo chown -R netlens:netlens /opt/netlens/logs
+   ```
+- Or rely on the built-in fallback (scanner will log to a writable location, e.g. `/tmp/...`).
+
 ### Check service status
 ```bash
 sudo systemctl status netlens.service

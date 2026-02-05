@@ -105,7 +105,7 @@ function AuthedApp() {
   );
 
   return (
-    <Box sx={{ display: 'flex' }}>
+    <Box sx={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
       <AppBar position="fixed" sx={{ zIndex: (theme) => theme.zIndex.drawer + 1 }}>
         <Toolbar sx={{ display: 'flex', justifyContent: 'space-between' }}>
           <Box sx={{ display: 'flex', alignItems: 'center' }}>
@@ -186,18 +186,20 @@ function AuthedApp() {
         </Drawer>
       )}
       
-      <Box component="main" sx={{ flexGrow: 1, p: { xs: 2, md: 3 } }}>
+      <Box component="main" sx={{ flexGrow: 1, p: { xs: 2, md: 3 }, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         <Toolbar />
-        <Container maxWidth="xl">
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/devices" element={<DeviceList />} />
-            <Route path="/topology" element={<NetworkTopology />} />
-            <Route path="/alerts" element={<AlertsList />} />
-            <Route path="/scans" element={<ScansList />} />
-            <Route path="/scans/:id" element={<ScanDetail />} />
-          </Routes>
-        </Container>
+        <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+          <Container maxWidth="xl" sx={{ height: '100%', py: 0 }}>
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/devices" element={<DeviceList />} />
+              <Route path="/topology" element={<NetworkTopology />} />
+              <Route path="/alerts" element={<AlertsList />} />
+              <Route path="/scans" element={<ScansList />} />
+              <Route path="/scans/:id" element={<ScanDetail />} />
+            </Routes>
+          </Container>
+        </Box>
       </Box>
 
       <ProfileDialog open={profileOpen} onClose={() => setProfileOpen(false)} />

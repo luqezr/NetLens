@@ -62,8 +62,26 @@ router.get('/log', async (req, res) => {
   try {
     const since = req.query?.since;
     const limit = req.query?.limit;
-    const data = scanManager.getLiveLog({ since, limit });
-    res.json({ success: true, data });
+
+    // Embedded mode: logs are captured from the spawned child process.
+    const embedded = scanManager.getLiveLog({ since, limit });
+    if (embedded && Array.isArray(embedded.items) && embedded.items.length > 0) {
+      return res.json({ success: true, data: embedded });
+    }
+
+    // External scanner mode: logs are written to MongoDB by scanner_service.py.
+    // Also use this as a fallback when embedded logs are empty (e.g. after restart or heartbeat timing).
+    const db = getDb();
+    const externalAlive = await scanManager.isExternalScannerAlive(db);
+    const fromDb = await scanManager.getLiveLogFromDb({ getDb, since, limit });
+
+    // Prefer DB results if they contain items or if the external scanner is alive.
+    if ((fromDb && Array.isArray(fromDb.items) && fromDb.items.length > 0) || externalAlive) {
+      return res.json({ success: true, data: fromDb });
+    }
+
+    // Nothing running / no logs
+    return res.json({ success: true, data: embedded });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }

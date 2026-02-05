@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""
-Fix MongoDB database issues:
-1. Drop and recreate MAC address index as sparse
-2. Remove devices with null MAC addresses
+"""Fix MongoDB database issues.
+
+1. Drop and recreate MAC address index as a *partial unique* index (ignores null/empty)
+2. Unset mac_address when it's null/empty to avoid unique-index collisions
 3. Clean up failed scan requests
+
+Why partial vs sparse?
+    - sparse indexes still include explicit null values.
+    - partialFilterExpression can ignore null/empty values entirely.
 """
 
 import os
@@ -36,30 +40,42 @@ print(f"Current indexes: {list(indexes.keys())}")
 
 if 'mac_address_1' in indexes:
     index_info = indexes['mac_address_1']
+    has_partial = 'partialFilterExpression' in index_info
     is_sparse = index_info.get('sparse', False)
-    print(f"  mac_address_1 index: sparse={is_sparse}")
-    
-    if not is_sparse:
-        print("  ⚠️  Index is not sparse! Dropping and recreating...")
-        db.devices.drop_index('mac_address_1')
-        db.devices.create_index('mac_address', unique=True, sparse=True)
-        print("  ✅ Recreated mac_address index as sparse")
-    else:
-        print("  ✅ Index is already sparse")
+    print(f"  mac_address_1 index: sparse={is_sparse} partial={has_partial}")
+
+    print("  Dropping and recreating mac_address index as partial unique...")
+    db.devices.drop_index('mac_address_1')
+    db.devices.create_index(
+        'mac_address',
+        unique=True,
+        partialFilterExpression={
+            'mac_address': {'$type': 'string', '$ne': ''}
+        }
+    )
+    print("  ✅ Recreated mac_address index as partial unique")
 else:
-    print("  Creating mac_address index as sparse...")
-    db.devices.create_index('mac_address', unique=True, sparse=True)
+    print("  Creating mac_address index as partial unique...")
+    db.devices.create_index(
+        'mac_address',
+        unique=True,
+        partialFilterExpression={
+            'mac_address': {'$type': 'string', '$ne': ''}
+        }
+    )
     print("  ✅ Created mac_address index")
 
-# 2. Remove null MAC addresses from existing devices
-print("\n→ Checking for devices with null MAC addresses...")
+# 2. Remove null/empty MAC addresses from existing devices
+print("\n→ Checking for devices with null/empty MAC addresses...")
 null_mac_count = db.devices.count_documents({'mac_address': None})
+empty_mac_count = db.devices.count_documents({'mac_address': ''})
 print(f"  Found {null_mac_count} devices with null MAC address")
+print(f"  Found {empty_mac_count} devices with empty MAC address")
 
-if null_mac_count > 0:
-    print("  Removing mac_address field from these devices...")
+if null_mac_count + empty_mac_count > 0:
+    print("  Unsetting mac_address field from these devices...")
     result = db.devices.update_many(
-        {'mac_address': None},
+        {'mac_address': {'$in': [None, '']}},
         {'$unset': {'mac_address': ''}}
     )
     print(f"  ✅ Updated {result.modified_count} devices")

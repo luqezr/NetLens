@@ -27,6 +27,37 @@ const darkTheme = createTheme({
     },
   },
   components: {
+    MuiCssBaseline: {
+      styleOverrides: {
+        html: {
+          height: '100%',
+        },
+        body: {
+          height: '100%',
+          scrollbarColor: '#7c3aed #0b0b12',
+          scrollbarWidth: 'thin',
+        },
+        '*': {
+          scrollbarColor: '#7c3aed #0b0b12',
+          scrollbarWidth: 'thin',
+        },
+        '*::-webkit-scrollbar': {
+          width: '10px',
+          height: '10px',
+        },
+        '*::-webkit-scrollbar-track': {
+          backgroundColor: '#0b0b12',
+        },
+        '*::-webkit-scrollbar-thumb': {
+          backgroundColor: '#3b2a78',
+          borderRadius: '10px',
+          border: '2px solid #0b0b12',
+        },
+        '*::-webkit-scrollbar-thumb:hover': {
+          backgroundColor: '#7c3aed',
+        },
+      },
+    },
     MuiAppBar: {
       styleOverrides: {
         root: {

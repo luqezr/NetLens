@@ -7,9 +7,25 @@ Run this to test the scanner directly with verbose output
 import os
 import sys
 
+
+def _maybe_reexec_into_venv() -> None:
+    """Ensure this script runs in the NetLens venv.
+
+    Many systems have `nmap` installed but not the Python module `python-nmap`
+    (system Python). NetLens installs python deps into `/opt/netlens/venv`.
+    """
+    venv_python = os.getenv('NETLENS_VENV_PYTHON', '/opt/netlens/venv/bin/python')
+    if not os.path.exists(venv_python):
+        return
+    # If we're not already using the venv interpreter, re-exec.
+    if os.path.realpath(sys.executable) != os.path.realpath(venv_python):
+        os.execv(venv_python, [venv_python] + sys.argv)
+
 # Set verbose logging
 os.environ['LOG_LEVEL'] = 'DEBUG'
 os.environ['ENV_FILE'] = '/opt/netlens/config.env'
+
+_maybe_reexec_into_venv()
 
 # Import after setting env vars
 from scanner_service import (

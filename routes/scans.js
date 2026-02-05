@@ -15,15 +15,55 @@ router.post('/run', async (req, res) => {
   try {
     const requestedBy = req.body?.requested_by || req.ip;
 
-    const requestId = await scanManager.requestManualScan({
-      getDb,
-      requested_by: requestedBy,
-    });
+    const networkRanges = (req.body?.network_ranges || req.body?.networkRanges || '').toString().trim();
+    const options = req.body?.options && typeof req.body.options === 'object' ? req.body.options : null;
+
+    const requestId = networkRanges || options
+      ? await scanManager.requestManualScanWithOptions({
+          getDb,
+          requested_by: requestedBy,
+          network_ranges: networkRanges || null,
+          options,
+        })
+      : await scanManager.requestManualScan({
+          getDb,
+          requested_by: requestedBy,
+        });
 
     res.json({
       success: true,
       data: { request_id: requestId },
     });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.post('/stop', async (req, res) => {
+  try {
+    const requestedBy = req.body?.requested_by || req.ip;
+    const result = await scanManager.forceStopAll({ getDb, requested_by: requestedBy });
+    res.json({ success: true, data: result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.get('/suggest-network', async (req, res) => {
+  try {
+    const suggestions = scanManager.suggestNetworkRanges();
+    res.json({ success: true, data: { suggestions } });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.get('/log', async (req, res) => {
+  try {
+    const since = req.query?.since;
+    const limit = req.query?.limit;
+    const data = scanManager.getLiveLog({ since, limit });
+    res.json({ success: true, data });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -37,10 +77,49 @@ router.get('/schedule', async (req, res) => {
       .collection('settings')
       .findOne({ _id: 'scan_schedule' });
 
+    const base = schedule || { _id: 'scan_schedule', enabled: false, interval_minutes: 60 };
+    const enabled = Boolean(base.enabled);
+    const interval = Math.max(1, Math.min(1440, Number(base.interval_minutes) || 60));
+    const now = new Date();
+    const next = enabled ? new Date(now.getTime() + interval * 60 * 1000) : null;
+    const occurrences = [];
+    if (enabled) {
+      for (let i = 0; i < 10; i += 1) {
+        occurrences.push(new Date(next.getTime() + i * interval * 60 * 1000));
+      }
+    }
+
     res.json({
       success: true,
-      data: schedule || { _id: 'scan_schedule', enabled: false, interval_minutes: 60 },
+      data: {
+        ...base,
+        interval_minutes: interval,
+        next_occurrences: occurrences,
+      },
     });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.delete('/schedule', async (req, res) => {
+  try {
+    const db = getDb();
+
+    const update = {
+      _id: 'scan_schedule',
+      enabled: false,
+      interval_minutes: 60,
+      updated_at: new Date(),
+    };
+
+    await db.collection('settings').updateOne(
+      { _id: 'scan_schedule' },
+      { $set: update, $setOnInsert: { created_at: new Date() } },
+      { upsert: true }
+    );
+
+    res.json({ success: true, data: update });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }

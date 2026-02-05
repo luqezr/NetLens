@@ -37,11 +37,15 @@ export const deleteAlert = (id) => api.delete(`/alerts/${id}`);
 
 // Scan control API
 export const runScanNow = (data) => api.post('/scans/run', data);
+export const stopAllScans = (data) => api.post('/scans/stop', data);
 export const getScanSchedule = () => api.get('/scans/schedule');
 export const setScanSchedule = (data) => api.post('/scans/schedule', data);
+export const deleteScanSchedule = () => api.delete('/scans/schedule');
 export const getScanStatus = () => api.get('/scans/status');
 export const getScanHistory = (params) => api.get('/scans/history', { params });
 export const getScanHistoryItem = (id) => api.get(`/scans/history/${id}`);
+export const getSuggestedNetworkRanges = () => api.get('/scans/suggest-network');
+export const getScanLiveLog = (params) => api.get('/scans/log', { params });
 
 // Health check
 export const healthCheck = () => axios.get('/health');

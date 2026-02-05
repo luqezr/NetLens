@@ -215,8 +215,8 @@ The frontend will display:
 ## 🔒 Security Considerations
 
 1. **Application login**: NetLens uses session-based authentication.
-   - Default username: `sudo`
-   - Default password: `Sudo123`
+   - Default username: `admin (proposed by ./install, can be replaced there)` 
+   - Default password: `automatically generated during ./install`
    - Change it immediately after first login via the profile menu in the UI.
 2. **Firewall**: Restrict API access to trusted networks
 3. **MongoDB**: Use authentication and restrict bind addresses in production
@@ -242,11 +242,14 @@ sudo journalctl -u api -f
 ```bash
 curl http://localhost:5000/health
 curl http://localhost:5000/api/devices
+
 ```
 
 ### Manual scan
 ```bash
 sudo python3 /opt/netscanner/scanner_service.py
+OR 
+sudo /opt/netlens/venv/bin/python /opt/netlens/scanner_service.py --run-once
 ```
 
 ## 📈 Performance

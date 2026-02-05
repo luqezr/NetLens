@@ -118,9 +118,9 @@ def _discover_hosts(ranges: list[str]) -> list[str]:
 			logger.info('Discovering hosts in {}', net)
 			# Fast, reliable host discovery:
 			# - Use ICMP echo + TCP SYN to common ports
-			# - Disable ARP ping to avoid proxy-ARP false positives
+			# - Prefer ARP on local networks to gather MAC/vendor when possible
 			# - Short timeout to skip unresponsive hosts quickly
-			args = '-sn --disable-arp-ping -PE -PS21,22,23,25,80,443,3389 --host-timeout 3s --max-retries 1'
+			args = '-sn -PR -PE -PS21,22,23,25,80,443,3389 --host-timeout 3s --max-retries 1'
 			scanner.scan(hosts=net, arguments=args)
 			
 			up_count = 0
@@ -135,6 +135,48 @@ def _discover_hosts(ranges: list[str]) -> list[str]:
 	total_found = len(found)
 	logger.info('Discovery complete: {} total hosts up', total_found)
 	return sorted(found)
+
+
+def _local_ipv4_addresses() -> list[str]:
+	"""Return best-effort local IPv4 addresses (non-loopback)."""
+	ips: list[str] = []
+	try:
+		import socket
+		hostname = socket.gethostname()
+		for res in socket.getaddrinfo(hostname, None):
+			addr = res[4][0]
+			if addr and '.' in addr and not addr.startswith('127.'):
+				ips.append(addr)
+	except Exception:
+		pass
+
+	# Deduplicate
+	seen = set()
+	unique: list[str] = []
+	for ip in ips:
+		if ip in seen:
+			continue
+		seen.add(ip)
+		unique.append(ip)
+	return unique
+
+
+def _is_same_subnet_24(ip: str) -> bool:
+	"""Heuristic: treat /24 as local if first 3 octets match any local IPv4."""
+	try:
+		parts = ip.split('.')
+		if len(parts) != 4:
+			return False
+		prefix = '.'.join(parts[:3])
+		for local_ip in _local_ipv4_addresses():
+			lp = local_ip.split('.')
+			if len(lp) != 4:
+				continue
+			if '.'.join(lp[:3]) == prefix:
+				return True
+	except Exception:
+		return False
+	return False
 
 
 
@@ -207,10 +249,24 @@ def _scan_host(ip: str, scan_at: datetime) -> dict:
 		args = override
 	elif is_root:
 		# -A enables OS detection, version detection, scripts, traceroute.
-		args = f'-sS -A --top-ports {top_ports} -T4 --host-timeout {host_timeout} --max-retries {max_retries}'
+		# Add a few flags that improve reliability + detail for per-host scans.
+		args = f'-sS -A --version-all --reason --top-ports {top_ports} -T4 --host-timeout {host_timeout} --max-retries {max_retries}'
 	else:
 		# Non-root: no SYN scan. Still do service/version detection.
-		args = f'-sT -sV --version-all --top-ports {top_ports} -T4 --host-timeout {host_timeout} --max-retries {max_retries}'
+		args = f'-sT -sV --version-all --reason --top-ports {top_ports} -T4 --host-timeout {host_timeout} --max-retries {max_retries}'
+
+	# For per-host scans (we already "discovered" the host), skip host discovery
+	# to avoid false negatives when ICMP/TCP probes are filtered.
+	assume_up = (os.getenv('SCAN_ASSUME_UP', '1') or '').strip().lower()
+	# However, on local subnets ARP-based discovery also yields MAC/vendor.
+	# So only force -Pn when the target doesn't look local.
+	if assume_up not in ('0', 'false', 'no', 'off') and '-Pn' not in args and not _is_same_subnet_24(ip):
+		args = f'{args} -Pn'
+
+	# Optional: let operators cap script runtime (helps on fragile networks).
+	script_timeout = (os.getenv('SCAN_SCRIPT_TIMEOUT') or '').strip()
+	if script_timeout and '--script-timeout' not in args:
+		args = f'{args} --script-timeout {script_timeout}'
 
 	device_data: dict = {
 		'ip_address': ip,
@@ -350,6 +406,15 @@ def run_scan(manager: MongoDBManager, reason: str) -> dict:
 		},
 		'devices': [],
 	})
+
+	# Push key scan metadata into scan_requests so the UI can display it live.
+	if scan_request_id:
+		_update_scan_request_progress(manager.db, scan_request_id, {
+			'network_ranges': ', '.join(ranges),
+			'environment': _get_scan_environment(),
+			'reason': reason,
+			'status': 'running',
+		})
 
 	started = datetime.now(timezone.utc)
 	scan_at = started

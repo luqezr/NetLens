@@ -6,6 +6,7 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import CancelIcon from '@mui/icons-material/Cancel';
 import WarningIcon from '@mui/icons-material/Warning';
 import { getStats, runScanNow, getScanSchedule, setScanSchedule, getScanStatus } from '../services/api';
+import RunScanDialog from './RunScanDialog';
 
 const COLORS = ['#7c3aed', '#22c55e', '#a855f7', '#10b981', '#c084fc'];
 
@@ -18,6 +19,7 @@ function Dashboard() {
   const [scanScheduleSaving, setScanScheduleSaving] = useState(false);
   const [scanMessage, setScanMessage] = useState(null);
   const [scanToastDismissed, setScanToastDismissed] = useState(false);
+  const [runDialogOpen, setRunDialogOpen] = useState(false);
 
   useEffect(() => {
     fetchStats();
@@ -65,11 +67,22 @@ function Dashboard() {
     }
   };
 
-  const handleRunScanNow = async () => {
+  const handleRunScanNow = async ({ networkRanges, verbose } = {}) => {
     try {
       setScanActionLoading(true);
       setScanMessage(null);
-      await runScanNow({ requested_by: 'ui' });
+      const options = verbose
+        ? {
+            // Increase log verbosity from the scanner service.
+            log_level: 'INFO',
+          }
+        : null;
+
+      await runScanNow({
+        requested_by: 'ui',
+        network_ranges: networkRanges || undefined,
+        options,
+      });
       setScanMessage({ severity: 'success', text: 'Scan requested.' });
       await fetchScanControls();
     } catch (error) {
@@ -148,7 +161,7 @@ function Dashboard() {
               </Box>
 
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
-                <Button variant="contained" onClick={handleRunScanNow} disabled={scanActionLoading}>
+                <Button variant="contained" onClick={() => setRunDialogOpen(true)} disabled={scanActionLoading}>
                   Run Scan Now
                 </Button>
 
@@ -214,6 +227,15 @@ function Dashboard() {
           />
         </Paper>
       </Snackbar>
+
+      <RunScanDialog
+        open={runDialogOpen}
+        onClose={() => setRunDialogOpen(false)}
+        onRun={async (form) => {
+          await handleRunScanNow({ networkRanges: form.networkRanges, verbose: form.verbose });
+          setRunDialogOpen(false);
+        }}
+      />
 
       {/* Summary Cards */}
       <Grid container spacing={3} sx={{ mb: 3 }}>

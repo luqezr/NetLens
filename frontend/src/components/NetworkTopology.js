@@ -22,6 +22,11 @@ const nodeColors = {
   unknown: '#95a5a6',
 };
 
+const edgeColors = {
+  uplink: '#e74c3c',
+  lan: '#64748b',
+};
+
 function NetworkTopology() {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
@@ -82,8 +87,21 @@ function NetworkTopology() {
         target: edge.target,
         type: 'smoothstep',
         animated: true,
-        style: { stroke: '#fff', strokeWidth: 2 },
+        style: {
+          stroke: edgeColors[edge.type] || '#64748b',
+          strokeWidth: 2,
+        },
         label: edge.type,
+        labelStyle: {
+          fill: '#0f172a',
+          fontSize: 12,
+        },
+        labelBgStyle: {
+          fill: 'rgba(255,255,255,0.9)',
+          color: '#0f172a',
+        },
+        labelBgPadding: [6, 3],
+        labelBgBorderRadius: 4,
       }));
 
       setNodes(flowNodes);

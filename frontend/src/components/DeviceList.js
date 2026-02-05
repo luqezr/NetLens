@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   Box,
   Paper,
+  Button,
   Typography,
   TextField,
   Select,
@@ -17,10 +18,60 @@ import {
   TableHead,
   TableRow,
   TablePagination,
+  CircularProgress,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import SearchIcon from '@mui/icons-material/Search';
 import { getDevices } from '../services/api';
+import DeviceDetailDialog from './DeviceDetailDialog';
+
+function formatDate(value) {
+  if (!value) return '—';
+  try {
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return String(value);
+    return d.toLocaleString();
+  } catch {
+    return String(value);
+  }
+}
+
+function getOsLabel(device) {
+  const os = device?.os;
+  if (!os) return '—';
+  if (typeof os === 'string') return os;
+  return os.type || os.name || os.family || '—';
+}
+
+function getOsVersionLabel(device) {
+  const os = device?.os;
+  if (!os || typeof os === 'string') return '—';
+  return os.version || os.os_version || '—';
+}
+
+function getOpenPortsCount(device) {
+  const n = device?.security?.open_ports_count;
+  if (Number.isFinite(Number(n))) return Number(n);
+  if (Array.isArray(device?.services)) return device.services.length;
+  return null;
+}
+
+function formatPorts(device, max = 4) {
+  const services = Array.isArray(device?.services) ? device.services : [];
+  const open = services
+    .filter((s) => (s?.state ? String(s.state).toLowerCase() === 'open' : true))
+    .map((s) => {
+      const port = s?.port;
+      const proto = s?.protocol;
+      if (port === null || port === undefined) return null;
+      return proto ? `${port}/${proto}` : String(port);
+    })
+    .filter(Boolean);
+
+  if (open.length === 0) return '—';
+  const shown = open.slice(0, max).join(', ');
+  return open.length > max ? `${shown}, …` : shown;
+}
 
 function DeviceList() {
   const [devices, setDevices] = useState([]);
@@ -29,17 +80,14 @@ function DeviceList() {
   const [statusFilter, setStatusFilter] = useState('');
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(25);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [selectedDeviceIp, setSelectedDeviceIp] = useState(null);
 
-  useEffect(() => {
-    fetchDevices();
-  }, [statusFilter]);
-
-  const fetchDevices = async () => {
+  const fetchDevices = useCallback(async () => {
     try {
       setLoading(true);
       const params = {};
       if (statusFilter) params.status = statusFilter;
-      if (search) params.search = search;
 
       const response = await getDevices(params);
       setDevices(response.data.data);
@@ -48,7 +96,11 @@ function DeviceList() {
       console.error('Error fetching devices:', error);
       setLoading(false);
     }
-  };
+  }, [statusFilter]);
+
+  useEffect(() => {
+    fetchDevices();
+  }, [fetchDevices]);
 
   const handleChangePage = (event, newPage) => {
     setPage(newPage);
@@ -77,13 +129,20 @@ function DeviceList() {
     device.vendor?.toLowerCase().includes(search.toLowerCase())
   );
 
+  const openDeviceDetails = (device) => {
+    const ip = device?.ip_address;
+    if (!ip) return;
+    setSelectedDeviceIp(ip);
+    setDetailOpen(true);
+  };
+
   return (
     <Box>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
         <Typography variant="h4">
           Devices ({filteredDevices.length})
         </Typography>
-        <IconButton onClick={fetchDevices} color="primary">
+        <IconButton onClick={fetchDevices} color="primary" disabled={loading}>
           <RefreshIcon />
         </IconButton>
       </Box>
@@ -117,49 +176,96 @@ function DeviceList() {
       </Paper>
 
       <TableContainer component={Paper}>
-        <Table>
+        <Table size="small" stickyHeader sx={{ minWidth: 900 }}>
           <TableHead>
             <TableRow>
+              <TableCell>Device</TableCell>
               <TableCell>IP Address</TableCell>
-              <TableCell>Hostname</TableCell>
-              <TableCell>MAC Address</TableCell>
-              <TableCell>Vendor</TableCell>
-              <TableCell>Device Type</TableCell>
-              <TableCell>Connection</TableCell>
+              <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>MAC</TableCell>
+              <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>Vendor</TableCell>
+              <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>Type</TableCell>
+              <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>Connection</TableCell>
+              <TableCell sx={{ display: { xs: 'none', lg: 'table-cell' } }}>OS</TableCell>
+              <TableCell sx={{ display: { xs: 'none', xl: 'table-cell' } }}>OS Version</TableCell>
+              <TableCell sx={{ display: { xs: 'none', lg: 'table-cell' } }}>Ports</TableCell>
+              <TableCell align="right">Open</TableCell>
               <TableCell>Status</TableCell>
+              <TableCell sx={{ display: { xs: 'none', lg: 'table-cell' } }}>First Seen</TableCell>
               <TableCell>Last Seen</TableCell>
+              <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>Last Scan</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
-            {filteredDevices
+            {loading && (
+              <TableRow>
+                <TableCell colSpan={13}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                    <CircularProgress size={18} />
+                    <Typography variant="body2" color="text.secondary">Loading devices…</Typography>
+                  </Box>
+                </TableCell>
+              </TableRow>
+            )}
+
+            {!loading && filteredDevices
               .slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage)
               .map((device) => (
                 <TableRow key={device._id} hover>
                   <TableCell>
-                    <Typography variant="body2" fontWeight="bold">
-                      {device.ip_address}
+                    <Button
+                      variant="text"
+                      onClick={() => openDeviceDetails(device)}
+                      sx={{
+                        textTransform: 'none',
+                        px: 0,
+                        justifyContent: 'flex-start',
+                        minWidth: 0,
+                        fontWeight: 700,
+                      }}
+                    >
+                      {device.hostname || device.ip_address}
+                    </Button>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: { xs: 'block', md: 'none' } }}>
+                      {device.connection_method || device.connection?.type || (typeof device.connection === 'string' ? device.connection : 'Unknown')}
                     </Typography>
                   </TableCell>
-                  <TableCell>{device.hostname || '-'}</TableCell>
                   <TableCell>
+                    <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+                      {device.ip_address || '-'}
+                    </Typography>
+                  </TableCell>
+                  <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>
                     <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
                       {device.mac_address || '-'}
                     </Typography>
                   </TableCell>
-                  <TableCell>{device.vendor || '-'}</TableCell>
-                  <TableCell>
+                  <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>{device.vendor || '-'}</TableCell>
+                  <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>
                     <Chip
                       label={device.device_type || 'Unknown'}
                       size="small"
                       variant="outlined"
                     />
                   </TableCell>
-                  <TableCell>
+                  <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>
                     <Chip
-                      label={device.connection?.type || 'Unknown'}
+                      label={device.connection_method || device.connection?.type || (typeof device.connection === 'string' ? device.connection : 'Unknown')}
                       size="small"
-                      color={getConnectionColor(device.connection?.type)}
+                      color={getConnectionColor(device.connection_method || device.connection?.type || (typeof device.connection === 'string' ? device.connection : undefined))}
+                      variant="outlined"
                     />
+                  </TableCell>
+                  <TableCell sx={{ display: { xs: 'none', lg: 'table-cell' } }}>
+                    {getOsLabel(device)}
+                  </TableCell>
+                  <TableCell sx={{ display: { xs: 'none', xl: 'table-cell' } }}>
+                    {getOsVersionLabel(device)}
+                  </TableCell>
+                  <TableCell sx={{ display: { xs: 'none', lg: 'table-cell' }, fontFamily: 'monospace' }}>
+                    {formatPorts(device)}
+                  </TableCell>
+                  <TableCell align="right">
+                    {getOpenPortsCount(device) ?? '—'}
                   </TableCell>
                   <TableCell>
                     <Chip
@@ -168,11 +274,25 @@ function DeviceList() {
                       color={device.status === 'online' ? 'success' : 'error'}
                     />
                   </TableCell>
+                  <TableCell sx={{ display: { xs: 'none', lg: 'table-cell' } }}>
+                    {formatDate(device.first_seen)}
+                  </TableCell>
                   <TableCell>
-                    {new Date(device.last_seen_on || device.last_seen).toLocaleString()}
+                    {formatDate(device.last_seen_on || device.last_seen)}
+                  </TableCell>
+                  <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>
+                    {formatDate(device.last_scan_on || device.last_scan)}
                   </TableCell>
                 </TableRow>
               ))}
+
+            {!loading && filteredDevices.length === 0 && (
+              <TableRow>
+                <TableCell colSpan={13}>
+                  <Typography variant="body2" color="text.secondary">No devices found.</Typography>
+                </TableCell>
+              </TableRow>
+            )}
           </TableBody>
         </Table>
         <TablePagination
@@ -185,6 +305,12 @@ function DeviceList() {
           onRowsPerPageChange={handleChangeRowsPerPage}
         />
       </TableContainer>
+
+      <DeviceDetailDialog
+        open={detailOpen}
+        onClose={() => setDetailOpen(false)}
+        deviceIp={selectedDeviceIp}
+      />
     </Box>
   );
 }

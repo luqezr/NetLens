@@ -1,12 +1,15 @@
 import React, { useState } from 'react';
 import { Routes, Route, Link } from 'react-router-dom';
-import { Box, AppBar, Toolbar, Typography, Container, Drawer, List, ListItem, ListItemButton, ListItemIcon, ListItemText, IconButton, Menu, MenuItem } from '@mui/material';
+import { Box, AppBar, Toolbar, Typography, Container, Drawer, List, ListItem, ListItemButton, ListItemIcon, ListItemText, IconButton, Menu, MenuItem, Tooltip, useMediaQuery } from '@mui/material';
+import { useTheme } from '@mui/material/styles';
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import DevicesIcon from '@mui/icons-material/Devices';
 import HubIcon from '@mui/icons-material/Hub';
 import NotificationsIcon from '@mui/icons-material/Notifications';
 import HistoryIcon from '@mui/icons-material/History';
 import AccountCircleIcon from '@mui/icons-material/AccountCircle';
+import MenuIcon from '@mui/icons-material/Menu';
+import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
 import Dashboard from './components/Dashboard';
 import DeviceList from './components/DeviceList';
 import NetworkTopology from './components/NetworkTopology';
@@ -18,6 +21,7 @@ import ProfileDialog from './components/ProfileDialog';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 
 const drawerWidth = 240;
+const collapsedDrawerWidth = 72;
 
 const menuItems = [
   { text: 'Dashboard', icon: <DashboardIcon />, path: '/' },
@@ -39,6 +43,10 @@ function AuthedApp() {
   const { user, loading, logout } = useAuth();
   const [anchorEl, setAnchorEl] = useState(null);
   const [profileOpen, setProfileOpen] = useState(false);
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('md'));
+  const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   if (loading) {
     return <Box sx={{ p: 3 }}><Typography>Loading...</Typography></Box>;
@@ -49,12 +57,73 @@ function AuthedApp() {
   }
 
   const menuOpen = Boolean(anchorEl);
+  const effectiveDrawerWidth = sidebarCollapsed ? collapsedDrawerWidth : drawerWidth;
+
+  const drawerContent = (
+    <>
+      <Toolbar />
+      <Box sx={{ overflow: 'auto' }}>
+        <List>
+          {menuItems.map((item) => (
+            <ListItem key={item.text} disablePadding sx={{ display: 'block' }}>
+              <Tooltip title={sidebarCollapsed ? item.text : ''} placement="right" disableHoverListener={!sidebarCollapsed}>
+                <ListItemButton
+                  component={Link}
+                  to={item.path}
+                  onClick={() => {
+                    if (isMobile) setMobileDrawerOpen(false);
+                  }}
+                  sx={{
+                    minHeight: 48,
+                    justifyContent: sidebarCollapsed ? 'center' : 'initial',
+                    px: 2.5,
+                  }}
+                >
+                  <ListItemIcon
+                    sx={{
+                      minWidth: 0,
+                      mr: sidebarCollapsed ? 'auto' : 2,
+                      justifyContent: 'center',
+                    }}
+                  >
+                    {item.icon}
+                  </ListItemIcon>
+                  <ListItemText
+                    primary={item.text}
+                    sx={{
+                      opacity: sidebarCollapsed ? 0 : 1,
+                      whiteSpace: 'nowrap',
+                    }}
+                  />
+                </ListItemButton>
+              </Tooltip>
+            </ListItem>
+          ))}
+        </List>
+      </Box>
+    </>
+  );
 
   return (
     <Box sx={{ display: 'flex' }}>
       <AppBar position="fixed" sx={{ zIndex: (theme) => theme.zIndex.drawer + 1 }}>
         <Toolbar sx={{ display: 'flex', justifyContent: 'space-between' }}>
           <Box sx={{ display: 'flex', alignItems: 'center' }}>
+            <IconButton
+              color="inherit"
+              edge="start"
+              onClick={() => {
+                if (isMobile) {
+                  setMobileDrawerOpen((v) => !v);
+                } else {
+                  setSidebarCollapsed((v) => !v);
+                }
+              }}
+              sx={{ mr: 1 }}
+              aria-label={isMobile ? 'Open navigation menu' : (sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar')}
+            >
+              {isMobile ? <MenuIcon /> : (sidebarCollapsed ? <MenuIcon /> : <ChevronLeftIcon />)}
+            </IconButton>
             <HubIcon sx={{ mr: 2 }} />
             <Typography variant="h6" noWrap component="div">
               NetLens
@@ -79,31 +148,45 @@ function AuthedApp() {
           </Box>
         </Toolbar>
       </AppBar>
+
+      {isMobile ? (
+        <Drawer
+          variant="temporary"
+          open={mobileDrawerOpen}
+          onClose={() => setMobileDrawerOpen(false)}
+          ModalProps={{ keepMounted: true }}
+          sx={{
+            display: { xs: 'block', md: 'none' },
+            '& .MuiDrawer-paper': { width: drawerWidth, boxSizing: 'border-box' },
+          }}
+        >
+          {drawerContent}
+        </Drawer>
+      ) : (
+        <Drawer
+          variant="permanent"
+          sx={{
+            display: { xs: 'none', md: 'block' },
+            width: effectiveDrawerWidth,
+            flexShrink: 0,
+            whiteSpace: 'nowrap',
+            '& .MuiDrawer-paper': {
+              width: effectiveDrawerWidth,
+              boxSizing: 'border-box',
+              overflowX: 'hidden',
+              transition: theme.transitions.create('width', {
+                easing: theme.transitions.easing.sharp,
+                duration: theme.transitions.duration.shortest,
+              }),
+            },
+          }}
+          open
+        >
+          {drawerContent}
+        </Drawer>
+      )}
       
-      <Drawer
-        variant="permanent"
-        sx={{
-          width: drawerWidth,
-          flexShrink: 0,
-          '& .MuiDrawer-paper': { width: drawerWidth, boxSizing: 'border-box' },
-        }}
-      >
-        <Toolbar />
-        <Box sx={{ overflow: 'auto' }}>
-          <List>
-            {menuItems.map((item) => (
-              <ListItem key={item.text} disablePadding>
-                <ListItemButton component={Link} to={item.path}>
-                  <ListItemIcon>{item.icon}</ListItemIcon>
-                  <ListItemText primary={item.text} />
-                </ListItemButton>
-              </ListItem>
-            ))}
-          </List>
-        </Box>
-      </Drawer>
-      
-      <Box component="main" sx={{ flexGrow: 1, p: 3 }}>
+      <Box component="main" sx={{ flexGrow: 1, p: { xs: 2, md: 3 } }}>
         <Toolbar />
         <Container maxWidth="xl">
           <Routes>

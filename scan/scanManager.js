@@ -46,15 +46,40 @@ function canWriteDir(dirPath) {
 let state = {
   running: false,
   current_request_id: null,
+  current_child_pid: null,
   last_started_at: null,
   last_finished_at: null,
   last_exit_code: null,
   last_error: null,
   last_stdout: null,
   last_stderr: null,
+  log_cursor: 0,
+  log_buffer: [],
   next_scheduled_at: null,
   schedule: { enabled: false, interval_minutes: 60 },
 };
+
+let currentChild = null;
+
+function pushLog({ stream, text }) {
+  if (!text) return;
+  const lines = String(text).split(/\r?\n/);
+  for (const line of lines) {
+    if (!line) continue;
+    state.log_cursor += 1;
+    state.log_buffer.push({
+      id: state.log_cursor,
+      ts: new Date(),
+      stream: stream || 'stdout',
+      text: line,
+      request_id: state.current_request_id,
+    });
+  }
+  // Keep a rolling buffer (last ~2000 lines)
+  if (state.log_buffer.length > 2000) {
+    state.log_buffer = state.log_buffer.slice(-2000);
+  }
+}
 
 let scheduleTimer = null;
 let scheduleRefreshTimer = null;
@@ -93,7 +118,7 @@ async function getScheduleSettings(db) {
   };
 }
 
-async function enqueueScan(db, { type, requested_by }) {
+async function enqueueScan(db, { type, requested_by, network_ranges, options }) {
   const doc = {
     type,
     status: 'queued',
@@ -101,6 +126,8 @@ async function enqueueScan(db, { type, requested_by }) {
     requested_at: new Date(),
     started_at: null,
     completed_at: null,
+    network_ranges: network_ranges || null,
+    options: options || null,
     result: null,
     error: null,
   };
@@ -124,7 +151,7 @@ function normalizeFindOneAndUpdateResult(result) {
   return null;
 }
 
-function runPythonOnce({ reason }) {
+function runPythonOnce({ reason, scan_request_id, network_ranges, options }) {
   return new Promise((resolve, reject) => {
     const python = getPythonPath();
     const script = getScannerScriptPath();
@@ -133,8 +160,18 @@ function runPythonOnce({ reason }) {
     const envFile = getEnvFile();
     if (envFile) env.ENV_FILE = envFile;
     env.SCAN_REASON = reason || '';
-    if (process.env.SCAN_REQUEST_ID) {
-      env.SCAN_REQUEST_ID = process.env.SCAN_REQUEST_ID;
+    if (scan_request_id) env.SCAN_REQUEST_ID = String(scan_request_id);
+    if (network_ranges) env.NETWORK_RANGES = String(network_ranges);
+
+    // Optional scan knobs provided by UI.
+    if (options && typeof options === 'object') {
+      if (options.nmap_args) env.SCAN_NMAP_ARGS = String(options.nmap_args);
+      if (options.top_ports) env.SCAN_TOP_PORTS = String(options.top_ports);
+      if (options.host_timeout) env.SCAN_HOST_TIMEOUT = String(options.host_timeout);
+      if (options.max_retries !== undefined && options.max_retries !== null) env.SCAN_MAX_RETRIES = String(options.max_retries);
+      if (options.assume_up !== undefined && options.assume_up !== null) env.SCAN_ASSUME_UP = String(options.assume_up ? '1' : '0');
+      if (options.script_timeout) env.SCAN_SCRIPT_TIMEOUT = String(options.script_timeout);
+      if (options.log_level) env.LOG_LEVEL = String(options.log_level);
     }
 
     // Avoid noisy PermissionError when running the API as a normal user (dev).
@@ -153,6 +190,9 @@ function runPythonOnce({ reason }) {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
+    currentChild = child;
+    state.current_child_pid = child.pid || null;
+
     let stdout = '';
     let stderr = '';
 
@@ -160,17 +200,27 @@ function runPythonOnce({ reason }) {
       const s = d.toString();
       stdout += s;
       if (stdout.length > 20000) stdout = stdout.slice(-20000);
-      process.stdout.write(`[scanner stdout] ${s}`);
+      pushLog({ stream: 'stdout', text: s });
+      const prefix = state.current_request_id ? `[scanner ${state.current_request_id} stdout] ` : '[scanner stdout] ';
+      process.stdout.write(prefix + s);
     });
     child.stderr.on('data', (d) => {
       const s = d.toString();
       stderr += s;
       if (stderr.length > 20000) stderr = stderr.slice(-20000);
-      process.stderr.write(`[scanner stderr] ${s}`);
+      pushLog({ stream: 'stderr', text: s });
+      const prefix = state.current_request_id ? `[scanner ${state.current_request_id} stderr] ` : '[scanner stderr] ';
+      process.stderr.write(prefix + s);
     });
 
     child.on('error', (err) => reject(err));
-    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    child.on('close', (code) => {
+      if (currentChild === child) {
+        currentChild = null;
+        state.current_child_pid = null;
+      }
+      resolve({ code, stdout, stderr });
+    });
   });
 }
 
@@ -184,6 +234,7 @@ async function processQueue(db) {
 
   state.running = true;
   state.current_request_id = request._id.toString();
+  state.log_buffer = [];
   state.last_started_at = new Date();
   state.last_error = null;
   state.last_stdout = null;
@@ -192,15 +243,23 @@ async function processQueue(db) {
   console.log(`🧭 Scan started (request=${state.current_request_id}, type=${request.type})`);
 
   try {
-    // Pass request id down so the scanner can update progress and attach raw results.
-    const previousEnvScanRequestId = process.env.SCAN_REQUEST_ID;
-    process.env.SCAN_REQUEST_ID = request._id.toString();
-    const runResult = await runPythonOnce({ reason: request.type });
-    if (previousEnvScanRequestId === undefined) {
-      delete process.env.SCAN_REQUEST_ID;
-    } else {
-      process.env.SCAN_REQUEST_ID = previousEnvScanRequestId;
+    const networkRanges = request.network_ranges || null;
+    const options = request.options || null;
+
+    // Record network ranges on the request so the UI can show it in /scans/status.
+    if (networkRanges) {
+      await db.collection('scan_requests').updateOne(
+        { _id: request._id },
+        { $set: { network_ranges: networkRanges } }
+      );
     }
+
+    const runResult = await runPythonOnce({
+      reason: request.type,
+      scan_request_id: request._id.toString(),
+      network_ranges: networkRanges,
+      options,
+    });
     state.last_exit_code = runResult.code;
     state.last_finished_at = new Date();
     state.last_stdout = runResult.stdout ? runResult.stdout.slice(-5000) : '';
@@ -321,6 +380,107 @@ async function requestManualScan({ getDb, requested_by }) {
   return id.toString();
 }
 
+async function requestManualScanWithOptions({ getDb, requested_by, network_ranges, options }) {
+  const db = getDb();
+  const id = await enqueueScan(db, { type: 'manual', requested_by, network_ranges, options });
+  console.log(`🟦 Manual scan requested (request=${id.toString()}, by=${requested_by || 'unknown'}, ranges=${network_ranges || 'default'})`);
+
+  setImmediate(() => {
+    processQueue(db).catch((e) => console.error('❌ Failed to process scan queue:', e));
+  });
+
+  return id.toString();
+}
+
+async function forceStopAll({ getDb, requested_by }) {
+  const db = getDb();
+
+  // Cancel queued requests.
+  await db.collection('scan_requests').updateMany(
+    { status: 'queued' },
+    { $set: { status: 'cancelled', completed_at: new Date(), error: `Cancelled by ${requested_by || 'user'}` } }
+  );
+
+  // If we have a live child process, terminate it.
+  const runningRequestId = state.current_request_id;
+  const child = currentChild;
+  if (child && !child.killed) {
+    try {
+      pushLog({ stream: 'stderr', text: `Force stop requested by ${requested_by || 'user'}` });
+      child.kill('SIGTERM');
+      // Escalate if needed.
+      setTimeout(() => {
+        try {
+          if (currentChild === child && !child.killed) child.kill('SIGKILL');
+        } catch {
+          // ignore
+        }
+      }, 3000);
+    } catch {
+      // ignore
+    }
+  }
+
+  // Mark any running requests as failed (whether or not we had a child handle).
+  await db.collection('scan_requests').updateMany(
+    { status: 'running' },
+    { $set: { status: 'failed', completed_at: new Date(), error: `Force stopped by ${requested_by || 'user'}` } }
+  );
+
+  // Reset local state for UI.
+  state.running = false;
+  state.current_request_id = null;
+  state.last_error = `Force stopped by ${requested_by || 'user'}`;
+
+  return { stopped_request_id: runningRequestId || null };
+}
+
+function getLiveLog({ since, limit } = {}) {
+  const sinceId = since ? Number(since) : 0;
+  const max = Number.isFinite(Number(limit)) ? Math.max(1, Math.min(2000, Number(limit))) : 400;
+  const items = state.log_buffer.filter((l) => l.id > sinceId).slice(-max);
+  const nextSince = items.length > 0 ? items[items.length - 1].id : sinceId;
+  return {
+    items,
+    next_since: nextSince,
+    running: Boolean(state.running),
+    current_request_id: state.current_request_id,
+    current_child_pid: state.current_child_pid,
+    timestamp: new Date(),
+  };
+}
+
+function suggestNetworkRanges() {
+  const nets = os.networkInterfaces();
+  const results = [];
+
+  for (const name of Object.keys(nets || {})) {
+    for (const addr of nets[name] || []) {
+      if (!addr || addr.internal) continue;
+      if (addr.family !== 'IPv4') continue;
+      const ip = addr.address;
+      // Best-effort: suggest /24 based on current interface IP.
+      const parts = ip.split('.');
+      if (parts.length !== 4) continue;
+      results.push({
+        interface: name,
+        ip,
+        cidr: `${parts[0]}.${parts[1]}.${parts[2]}.0/24`,
+      });
+    }
+  }
+
+  // De-dupe cidr suggestions.
+  const seen = new Set();
+  const unique = [];
+  for (const r of results) {
+    if (seen.has(r.cidr)) continue;
+    seen.add(r.cidr);
+    unique.push(r);
+  }
+  return unique;
+}
+
 async function getStatus({ getDb }) {
   const db = getDb();
   const latestHistory = await db
@@ -366,5 +526,9 @@ async function getStatus({ getDb }) {
 module.exports = {
   init,
   requestManualScan,
+  requestManualScanWithOptions,
   getStatus,
+  forceStopAll,
+  getLiveLog,
+  suggestNetworkRanges,
 };

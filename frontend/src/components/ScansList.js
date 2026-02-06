@@ -19,6 +19,9 @@ export default function ScansList() {
   const [error, setError] = useState(null);
   const [status, setStatus] = useState(null);
   const [schedule, setSchedule] = useState({ enabled: false, interval_minutes: 60, next_occurrences: [] });
+  const [scheduleMode, setScheduleMode] = useState('interval');
+  const [scheduleDate, setScheduleDate] = useState('');
+  const [scheduleTime, setScheduleTime] = useState('');
   const [scheduleSaving, setScheduleSaving] = useState(false);
   const [forceStopping, setForceStopping] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
@@ -35,7 +38,24 @@ export default function ScansList() {
 
       setItems(historyRes.data.data || []);
       setStatus(statusRes.data.data || null);
-      setSchedule(scheduleRes.data.data || { enabled: false, interval_minutes: 60, next_occurrences: [] });
+      const sched = scheduleRes.data.data || { enabled: false, interval_minutes: 60, next_occurrences: [] };
+      setSchedule(sched);
+
+      const mode = sched?.mode === 'exact' ? 'exact' : 'interval';
+      setScheduleMode(mode);
+      if (mode === 'exact' && sched?.exact_at) {
+        const d = new Date(sched.exact_at);
+        if (!Number.isNaN(d.getTime())) {
+          // Convert to local date/time strings for inputs.
+          const yyyy = d.getFullYear();
+          const mm = String(d.getMonth() + 1).padStart(2, '0');
+          const dd = String(d.getDate()).padStart(2, '0');
+          const hh = String(d.getHours()).padStart(2, '0');
+          const mi = String(d.getMinutes()).padStart(2, '0');
+          setScheduleDate(`${yyyy}-${mm}-${dd}`);
+          setScheduleTime(`${hh}:${mi}`);
+        }
+      }
     } catch (e) {
       setError(e?.response?.data?.error || e.message || 'Failed to load scans');
     } finally {
@@ -71,9 +91,24 @@ export default function ScansList() {
   const handleSaveSchedule = async () => {
     try {
       setScheduleSaving(true);
+      let exactAt = null;
+      if (scheduleMode === 'exact') {
+        if (!scheduleDate || !scheduleTime) {
+          throw new Error('Please select both a date and time for the exact schedule.');
+        }
+        // Interpret date/time as local time.
+        const local = new Date(`${scheduleDate}T${scheduleTime}:00`);
+        if (Number.isNaN(local.getTime())) {
+          throw new Error('Invalid date/time');
+        }
+        exactAt = local.toISOString();
+      }
+
       await setScanSchedule({
         enabled: Boolean(schedule.enabled),
         interval_minutes: Number(schedule.interval_minutes) || 60,
+        mode: scheduleMode,
+        exact_at: exactAt,
       });
       await load();
     } catch (e) {
@@ -140,6 +175,20 @@ export default function ScansList() {
               control={<Switch checked={Boolean(schedule.enabled)} onChange={(e) => setSchedule((s) => ({ ...s, enabled: e.target.checked }))} />}
               label="Enable schedule"
             />
+
+            <TextField
+              label="Mode"
+              size="small"
+              select
+              SelectProps={{ native: true }}
+              value={scheduleMode}
+              onChange={(e) => setScheduleMode(e.target.value)}
+              sx={{ width: 170 }}
+            >
+              <option value="interval">Interval</option>
+              <option value="exact">Exact date/time</option>
+            </TextField>
+
             <TextField
               label="Interval (minutes)"
               type="number"
@@ -148,7 +197,31 @@ export default function ScansList() {
               onChange={(e) => setSchedule((s) => ({ ...s, interval_minutes: e.target.value }))}
               inputProps={{ min: 1, max: 1440 }}
               sx={{ width: 180 }}
+              disabled={scheduleMode !== 'interval'}
             />
+
+            <TextField
+              label="Date"
+              type="date"
+              size="small"
+              value={scheduleDate}
+              onChange={(e) => setScheduleDate(e.target.value)}
+              sx={{ width: 180 }}
+              disabled={scheduleMode !== 'exact'}
+              InputLabelProps={{ shrink: true }}
+            />
+
+            <TextField
+              label="Time"
+              type="time"
+              size="small"
+              value={scheduleTime}
+              onChange={(e) => setScheduleTime(e.target.value)}
+              sx={{ width: 140 }}
+              disabled={scheduleMode !== 'exact'}
+              InputLabelProps={{ shrink: true }}
+            />
+
             <Button variant="contained" onClick={handleSaveSchedule} disabled={scheduleSaving}>
               Save
             </Button>

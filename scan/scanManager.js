@@ -115,6 +115,8 @@ async function getScheduleSettings(db) {
   return {
     enabled: Boolean(doc.enabled),
     interval_minutes: Number(doc.interval_minutes) || 60,
+  mode: doc.mode === 'exact' ? 'exact' : 'interval',
+  exact_at: doc.exact_at || null,
   };
 }
 
@@ -322,23 +324,89 @@ async function refreshSchedule(db) {
   const next = await getScheduleSettings(db);
   state.schedule = next;
 
+  // If schedule is disabled, always clear the timer.
+  if (!next.enabled) {
+    if (scheduleTimer) {
+      clearInterval(scheduleTimer);
+      scheduleTimer = null;
+    }
+    state.next_scheduled_at = null;
+    state._schedule_interval_ms = null;
+    return;
+  }
+
+  // Calendar-based one-shot schedule.
+  if (next.mode === 'exact' && next.exact_at) {
+    const target = new Date(next.exact_at);
+    if (Number.isNaN(target.getTime())) {
+      state.next_scheduled_at = null;
+      return;
+    }
+
+    // Clear any interval timer.
+    if (scheduleTimer) {
+      clearInterval(scheduleTimer);
+      scheduleTimer = null;
+    }
+
+    const ms = Math.max(0, target.getTime() - Date.now());
+    state.next_scheduled_at = target;
+
+    // Recreate one-shot timer only if timestamp changed.
+    const fingerprint = String(target.getTime());
+    if (state._schedule_exact_fingerprint === fingerprint && state._schedule_exact_timeout) {
+      return;
+    }
+    state._schedule_exact_fingerprint = fingerprint;
+
+    if (state._schedule_exact_timeout) {
+      clearTimeout(state._schedule_exact_timeout);
+      state._schedule_exact_timeout = null;
+    }
+
+    state._schedule_exact_timeout = setTimeout(async () => {
+      try {
+        await enqueueScan(db, { type: 'scheduled', requested_by: 'server' });
+        console.log(`🗓️ Scheduled scan enqueued (at ${target.toISOString()})`);
+        await processQueue(db);
+
+        // Auto-disable exact schedule after it fires (one-shot semantics).
+        await db.collection('settings').updateOne(
+          { _id: 'scan_schedule' },
+          { $set: { enabled: false, updated_at: new Date() } },
+          { upsert: true }
+        );
+        state.next_scheduled_at = null;
+      } catch {
+        // ignore
+      }
+    }, ms);
+
+    return;
+  }
+
+  const intervalMinutes = Math.max(1, Math.min(1440, next.interval_minutes));
+  const intervalMs = intervalMinutes * 60 * 1000;
+
+  // Don't recreate the timer every refresh tick; otherwise it never fires.
+  const needsNewTimer = !scheduleTimer || state._schedule_interval_ms !== intervalMs;
+  state._schedule_interval_ms = intervalMs;
+
+  if (!state.next_scheduled_at || needsNewTimer) {
+    state.next_scheduled_at = new Date(Date.now() + intervalMs);
+  }
+
+  if (!needsNewTimer) return;
+
   if (scheduleTimer) {
     clearInterval(scheduleTimer);
     scheduleTimer = null;
   }
 
-  if (!next.enabled) {
-    state.next_scheduled_at = null;
-    return;
-  }
-
-  const intervalMs = Math.max(1, Math.min(1440, next.interval_minutes)) * 60 * 1000;
-  state.next_scheduled_at = new Date(Date.now() + intervalMs);
-
   scheduleTimer = setInterval(async () => {
     try {
       await enqueueScan(db, { type: 'scheduled', requested_by: 'server' });
-      console.log(`⏱️ Scheduled scan enqueued (every ${Math.max(1, Math.min(1440, next.interval_minutes))} min)`);
+      console.log(`⏱️ Scheduled scan enqueued (every ${intervalMinutes} min)`);
       await processQueue(db);
       state.next_scheduled_at = new Date(Date.now() + intervalMs);
     } catch {

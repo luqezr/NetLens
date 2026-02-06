@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import threading
 import subprocess
 import json
+import re
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -233,6 +234,9 @@ def _scan_host(ip: str, scan_at: datetime) -> dict:
 
 	# Thorough scan by default; can be overridden via SCAN_NMAP_ARGS.
 	override = (os.getenv('SCAN_NMAP_ARGS') or '').strip()
+	# Optional: NSE script selectors (e.g. "vuln" or "vuln or safe").
+	# Empty/"off" disables adding a --script arg automatically.
+	nmap_scripts = (os.getenv('SCAN_NMAP_SCRIPTS') or '').strip()
 	top_ports = os.getenv('SCAN_TOP_PORTS', '1000')
 	host_timeout = os.getenv('SCAN_HOST_TIMEOUT', '120s')
 	max_retries = os.getenv('SCAN_MAX_RETRIES', '2')
@@ -254,6 +258,15 @@ def _scan_host(ip: str, scan_at: datetime) -> dict:
 	else:
 		# Non-root: no SYN scan. Still do service/version detection.
 		args = f'-sT -sV --version-all --reason --top-ports {top_ports} -T4 --host-timeout {host_timeout} --max-retries {max_retries}'
+
+	# Add vulnerability scripts unless the operator overrides args entirely.
+	# Default is "vuln" to surface CVEs/known issues, but allow disabling.
+	if not override:
+		if not nmap_scripts:
+			nmap_scripts = 'vuln'
+		if nmap_scripts.lower() not in ('0', 'off', 'false', 'disable', 'disabled', 'none'):
+			if '--script' not in args:
+				args = f'{args} --script {nmap_scripts}'
 
 	# For per-host scans (we already "discovered" the host), skip host discovery
 	# to avoid false negatives when ICMP/TCP probes are filtered.
@@ -347,6 +360,33 @@ def _scan_host(ip: str, scan_at: datetime) -> dict:
 			device_data['services'] = services
 			device_data.setdefault('security', {})
 			device_data['security']['open_ports_count'] = len({(s['protocol'], s['port']) for s in services})
+
+		# Extract CVEs from NSE script output (service-level + host-level).
+		# Note: NSE scripts often print "IDs: CVE:..." or include CVE strings inline.
+		cve_set: set[str] = set()
+		try:
+			# Host scripts:
+			for hs in host.get('hostscript') or []:
+				out = (hs.get('output') or '') if isinstance(hs, dict) else str(hs)
+				for c in re.findall(r'\bCVE-\d{4}-\d{4,7}\b', out, flags=re.IGNORECASE):
+					cve_set.add(c.upper())
+		except Exception:
+			pass
+		try:
+			# Service scripts:
+			for svc in services:
+				scripts = svc.get('scripts') or {}
+				if not isinstance(scripts, dict):
+					continue
+				for out in scripts.values():
+					for c in re.findall(r'\bCVE-\d{4}-\d{4,7}\b', str(out), flags=re.IGNORECASE):
+						cve_set.add(c.upper())
+		except Exception:
+			pass
+		if cve_set:
+			device_data.setdefault('security', {})
+			device_data['security']['cves'] = sorted(cve_set)
+			device_data['security']['cve_count'] = len(cve_set)
 
 		# OS / device type info (when available)
 		try:

@@ -77,15 +77,28 @@ router.get('/schedule', async (req, res) => {
       .collection('settings')
       .findOne({ _id: 'scan_schedule' });
 
-    const base = schedule || { _id: 'scan_schedule', enabled: false, interval_minutes: 60 };
+    const base = schedule || { _id: 'scan_schedule', enabled: false, interval_minutes: 60, mode: 'interval', exact_at: null };
     const enabled = Boolean(base.enabled);
+    const mode = base.mode === 'exact' ? 'exact' : 'interval';
     const interval = Math.max(1, Math.min(1440, Number(base.interval_minutes) || 60));
     const now = new Date();
-    const next = enabled ? new Date(now.getTime() + interval * 60 * 1000) : null;
+    let next = null;
+    if (enabled) {
+      if (mode === 'exact' && base.exact_at) {
+        const d = new Date(base.exact_at);
+        next = Number.isNaN(d.getTime()) ? null : d;
+      } else {
+        next = new Date(now.getTime() + interval * 60 * 1000);
+      }
+    }
     const occurrences = [];
     if (enabled) {
-      for (let i = 0; i < 10; i += 1) {
-        occurrences.push(new Date(next.getTime() + i * interval * 60 * 1000));
+      if (mode === 'exact') {
+        if (next) occurrences.push(next);
+      } else if (next) {
+        for (let i = 0; i < 10; i += 1) {
+          occurrences.push(new Date(next.getTime() + i * interval * 60 * 1000));
+        }
       }
     }
 
@@ -93,6 +106,7 @@ router.get('/schedule', async (req, res) => {
       success: true,
       data: {
         ...base,
+  mode,
         interval_minutes: interval,
         next_occurrences: occurrences,
       },
@@ -131,6 +145,10 @@ router.post('/schedule', async (req, res) => {
     const enabled = Boolean(req.body?.enabled);
     const intervalMinutesRaw = req.body?.interval_minutes;
 
+  // Optional: exact run time (one-shot). UI sends an ISO string.
+  // If set, the server will enqueue a scan at or after that timestamp.
+  const exactAtRaw = req.body?.exact_at || req.body?.exactAt || null;
+
     let intervalMinutes = null;
     if (intervalMinutesRaw !== undefined && intervalMinutesRaw !== null && intervalMinutesRaw !== '') {
       intervalMinutes = Number(intervalMinutesRaw);
@@ -143,10 +161,21 @@ router.post('/schedule', async (req, res) => {
       intervalMinutes = Math.floor(intervalMinutes);
     }
 
+    let exactAt = null;
+    if (exactAtRaw) {
+      const d = new Date(exactAtRaw);
+      if (Number.isNaN(d.getTime())) {
+        return res.status(400).json({ success: false, error: 'exact_at must be a valid ISO datetime string' });
+      }
+      exactAt = d;
+    }
+
     const update = {
       _id: 'scan_schedule',
       enabled,
-      interval_minutes: intervalMinutes ?? 60,
+  mode: exactAt ? 'exact' : 'interval',
+  interval_minutes: intervalMinutes ?? 60,
+  exact_at: exactAt,
       updated_at: new Date(),
     };
 

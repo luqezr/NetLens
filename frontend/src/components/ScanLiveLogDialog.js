@@ -52,7 +52,13 @@ export default function ScanLiveLogDialog({ open, onClose }) {
             // cap in UI
             return next.slice(-2000);
           });
-          setCursor(Number(data?.next_since) || cursor);
+        }
+
+        // Always advance the cursor if the server returned a next_since.
+        // This prevents the UI from getting stuck if the buffer was trimmed.
+        const nextSince = Number(data?.next_since);
+        if (Number.isFinite(nextSince) && nextSince >= 0) {
+          setCursor(nextSince);
         }
 
         setError(null);

@@ -43,20 +43,6 @@ function canWriteDir(dirPath) {
   }
 }
 
-function canWriteFile(filePath) {
-  try {
-    if (fs.existsSync(filePath)) {
-      fs.accessSync(filePath, fs.constants.W_OK);
-      return true;
-    }
-    const parent = path.dirname(filePath);
-    fs.accessSync(parent, fs.constants.W_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 let state = {
   running: false,
   current_request_id: null,
@@ -98,33 +84,6 @@ function pushLog({ stream, text }) {
 let scheduleTimer = null;
 let scheduleRefreshTimer = null;
 
-function isTruthy(value) {
-  if (value === true) return true;
-  const s = String(value || '').trim().toLowerCase();
-  return s === '1' || s === 'true' || s === 'yes' || s === 'on';
-}
-
-async function getScannerHeartbeat(db) {
-  try {
-    return await db.collection('settings').findOne({ _id: 'scanner_heartbeat' });
-  } catch {
-    return null;
-  }
-}
-
-async function isExternalScannerAlive(db) {
-  // Allow forcing embedded mode (useful for dev)
-  if (isTruthy(process.env.SCAN_EMBEDDED_ONLY)) return false;
-
-  const hb = await getScannerHeartbeat(db);
-  const ts = hb?.updated_at ? new Date(hb.updated_at).getTime() : 0;
-  if (!Number.isFinite(ts) || ts <= 0) return false;
-
-  const maxAgeMs = Number(process.env.SCANNER_HEARTBEAT_MAX_AGE_MS || 45_000);
-  const maxAge = Number.isFinite(maxAgeMs) ? Math.max(5_000, Math.min(10 * 60_000, maxAgeMs)) : 45_000;
-  return Date.now() - ts <= maxAge;
-}
-
 function getStaleMinutes() {
   const raw = process.env.SCAN_STALE_MINUTES;
   const n = raw ? Number(raw) : 180;
@@ -156,6 +115,8 @@ async function getScheduleSettings(db) {
   return {
     enabled: Boolean(doc.enabled),
     interval_minutes: Number(doc.interval_minutes) || 60,
+  mode: doc.mode === 'exact' ? 'exact' : 'interval',
+  exact_at: doc.exact_at || null,
   };
 }
 
@@ -215,18 +176,15 @@ function runPythonOnce({ reason, scan_request_id, network_ranges, options }) {
       if (options.log_level) env.LOG_LEVEL = String(options.log_level);
     }
 
-    // Avoid noisy PermissionError when the API runs as a normal user.
-    // If LOG_FILE is set but not writable, override it.
-    // Also prefer a separate log file for API-triggered scans so we don't fight with a root-owned scanner.log.
-    const isRoot = typeof process.getuid === 'function' ? process.getuid() === 0 : false;
-    const optLogDir = '/opt/netlens/logs';
-    const preferred = isRoot ? 'scanner.log' : 'scanner-ui.log';
-    const desired = canWriteDir(optLogDir)
-      ? path.join(optLogDir, preferred)
-      : path.join(os.tmpdir(), preferred);
-
-    if (!env.LOG_FILE || !canWriteFile(env.LOG_FILE)) {
-      env.LOG_FILE = desired;
+    // Avoid noisy PermissionError when running the API as a normal user (dev).
+    // The service user (netscanner) typically has write access to /opt/netlens/logs.
+    if (!env.LOG_FILE) {
+      const optLogDir = '/opt/netlens/logs';
+      if (canWriteDir(optLogDir)) {
+        env.LOG_FILE = path.join(optLogDir, 'scanner.log');
+      } else {
+        env.LOG_FILE = path.join(os.tmpdir(), 'netlens-scanner.log');
+      }
     }
 
     const child = spawn(python, [script, '--run-once'], {
@@ -269,11 +227,6 @@ function runPythonOnce({ reason, scan_request_id, network_ranges, options }) {
 }
 
 async function processQueue(db) {
-  // If the privileged scanner service is running, it will pick up queued requests.
-  // Avoid running scans in the API process (often unprivileged), which reduces discovery coverage.
-  if (await isExternalScannerAlive(db)) {
-    return;
-  }
   if (state.running) return;
 
   // Try to claim a request
@@ -371,28 +324,89 @@ async function refreshSchedule(db) {
   const next = await getScheduleSettings(db);
   state.schedule = next;
 
+  // If schedule is disabled, always clear the timer.
+  if (!next.enabled) {
+    if (scheduleTimer) {
+      clearInterval(scheduleTimer);
+      scheduleTimer = null;
+    }
+    state.next_scheduled_at = null;
+    state._schedule_interval_ms = null;
+    return;
+  }
+
+  // Calendar-based one-shot schedule.
+  if (next.mode === 'exact' && next.exact_at) {
+    const target = new Date(next.exact_at);
+    if (Number.isNaN(target.getTime())) {
+      state.next_scheduled_at = null;
+      return;
+    }
+
+    // Clear any interval timer.
+    if (scheduleTimer) {
+      clearInterval(scheduleTimer);
+      scheduleTimer = null;
+    }
+
+    const ms = Math.max(0, target.getTime() - Date.now());
+    state.next_scheduled_at = target;
+
+    // Recreate one-shot timer only if timestamp changed.
+    const fingerprint = String(target.getTime());
+    if (state._schedule_exact_fingerprint === fingerprint && state._schedule_exact_timeout) {
+      return;
+    }
+    state._schedule_exact_fingerprint = fingerprint;
+
+    if (state._schedule_exact_timeout) {
+      clearTimeout(state._schedule_exact_timeout);
+      state._schedule_exact_timeout = null;
+    }
+
+    state._schedule_exact_timeout = setTimeout(async () => {
+      try {
+        await enqueueScan(db, { type: 'scheduled', requested_by: 'server' });
+        console.log(`🗓️ Scheduled scan enqueued (at ${target.toISOString()})`);
+        await processQueue(db);
+
+        // Auto-disable exact schedule after it fires (one-shot semantics).
+        await db.collection('settings').updateOne(
+          { _id: 'scan_schedule' },
+          { $set: { enabled: false, updated_at: new Date() } },
+          { upsert: true }
+        );
+        state.next_scheduled_at = null;
+      } catch {
+        // ignore
+      }
+    }, ms);
+
+    return;
+  }
+
+  const intervalMinutes = Math.max(1, Math.min(1440, next.interval_minutes));
+  const intervalMs = intervalMinutes * 60 * 1000;
+
+  // Don't recreate the timer every refresh tick; otherwise it never fires.
+  const needsNewTimer = !scheduleTimer || state._schedule_interval_ms !== intervalMs;
+  state._schedule_interval_ms = intervalMs;
+
+  if (!state.next_scheduled_at || needsNewTimer) {
+    state.next_scheduled_at = new Date(Date.now() + intervalMs);
+  }
+
+  if (!needsNewTimer) return;
+
   if (scheduleTimer) {
     clearInterval(scheduleTimer);
     scheduleTimer = null;
   }
 
-  if (!next.enabled) {
-    state.next_scheduled_at = null;
-    return;
-  }
-
-  const intervalMs = Math.max(1, Math.min(1440, next.interval_minutes)) * 60 * 1000;
-  state.next_scheduled_at = new Date(Date.now() + intervalMs);
-
-  // If external scanner is alive, let it handle scheduling to avoid double-enqueue.
-  if (await isExternalScannerAlive(db)) {
-    return;
-  }
-
   scheduleTimer = setInterval(async () => {
     try {
       await enqueueScan(db, { type: 'scheduled', requested_by: 'server' });
-      console.log(`⏱️ Scheduled scan enqueued (every ${Math.max(1, Math.min(1440, next.interval_minutes))} min)`);
+      console.log(`⏱️ Scheduled scan enqueued (every ${intervalMinutes} min)`);
       await processQueue(db);
       state.next_scheduled_at = new Date(Date.now() + intervalMs);
     } catch {
@@ -428,7 +442,6 @@ async function requestManualScan({ getDb, requested_by }) {
   console.log(`🟦 Manual scan requested (request=${id.toString()}, by=${requested_by || 'unknown'})`);
 
   // Fire-and-forget processing so the HTTP request can return immediately.
-  // Skip if external scanner service is active.
   setImmediate(() => {
     processQueue(db).catch((e) => console.error('❌ Failed to process scan queue:', e));
   });
@@ -502,50 +515,6 @@ function getLiveLog({ since, limit } = {}) {
     current_request_id: state.current_request_id,
     current_child_pid: state.current_child_pid,
     timestamp: new Date(),
-    source: 'embedded',
-  };
-}
-
-async function getLiveLogFromDb({ getDb, since, limit } = {}) {
-  const db = getDb();
-
-  // Prefer the currently-running request, else most recently-updated one with logs.
-  const runningReq = await db
-    .collection('scan_requests')
-    .find({ status: 'running' })
-    .sort({ started_at: -1 })
-    .limit(1)
-    .toArray();
-
-  let req = runningReq[0] || null;
-  if (!req) {
-    const recentWithLogs = await db
-      .collection('scan_requests')
-      .find({ live_log: { $exists: true, $ne: [] } })
-      .sort({ updated_at: -1 })
-      .limit(1)
-      .toArray();
-    req = recentWithLogs[0] || null;
-  }
-
-  const running = req ? req.status === 'running' : false;
-  const requestId = req?._id ? req._id.toString() : null;
-
-  const sinceId = since ? Number(since) : 0;
-  const max = Number.isFinite(Number(limit)) ? Math.max(1, Math.min(2000, Number(limit))) : 400;
-
-  const log = Array.isArray(req?.live_log) ? req.live_log : [];
-  const items = log.filter((l) => (Number(l?.id) || 0) > sinceId).slice(-max);
-  const nextSince = items.length > 0 ? Number(items[items.length - 1].id) : sinceId;
-
-  return {
-    items,
-    next_since: nextSince,
-    running,
-    current_request_id: requestId,
-    current_child_pid: null,
-    timestamp: new Date(),
-    source: 'mongodb',
   };
 }
 
@@ -582,8 +551,6 @@ function suggestNetworkRanges() {
 
 async function getStatus({ getDb }) {
   const db = getDb();
-  const external_scanner_alive = await isExternalScannerAlive(db);
-  const scanner_heartbeat = await getScannerHeartbeat(db);
   const latestHistory = await db
     .collection('scan_history')
     .find({})
@@ -613,8 +580,6 @@ async function getStatus({ getDb }) {
 
   return {
     ...state,
-    external_scanner_alive,
-    scanner_heartbeat,
     latest_scan: latestHistory[0] || null,
     current_request,
     // Back-compat naming for UI/API clients
@@ -633,9 +598,5 @@ module.exports = {
   getStatus,
   forceStopAll,
   getLiveLog,
-  getLiveLogFromDb,
   suggestNetworkRanges,
-  // Exposed for routes that need to decide between embedded vs external scanner.
-  isExternalScannerAlive,
-  getScannerHeartbeat,
 };

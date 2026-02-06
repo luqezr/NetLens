@@ -128,10 +128,41 @@ MONGO_DB_NAME=netlens
 NETWORK_RANGES=192.168.1.0/24,10.0.0.0/24
 SCAN_SCHEDULE=*/60 * * * *  # Every hour
 
+# Nmap scan tuning
+# By default, NetLens adds "--script vuln" to per-host scans (unless you fully override args).
+# You can change or disable this:
+#   SCAN_NMAP_SCRIPTS=vuln            # (default)
+#   SCAN_NMAP_SCRIPTS="vuln or safe" # safer but still informative
+#   SCAN_NMAP_SCRIPTS=off             # don't add --script automatically
+# You can also fully override nmap arguments:
+#   SCAN_NMAP_ARGS=-sS -A --top-ports 1000 -T4 -Pn
+# and optionally cap NSE runtime:
+#   SCAN_SCRIPT_TIMEOUT=120s
+
 # API Settings
 PORT=5000
 NODE_ENV=production
 ```
+
+### Vulnerability & CVE detection
+
+When NSE scripts are enabled (default: `SCAN_NMAP_SCRIPTS=vuln`), the scanner parses script output and extracts CVE identifiers.
+They’re stored on each device record under:
+
+- `security.cves` (array of CVE strings)
+- `security.cve_count` (integer)
+
+Notes:
+
+- Running vulnerability scripts can be slower and may trigger IDS/IPS alerts.
+- If you see timeouts, set `SCAN_SCRIPT_TIMEOUT` to a higher value or disable scripts with `SCAN_NMAP_SCRIPTS=off`.
+
+### Scheduled scans
+
+The UI supports two schedule modes:
+
+- **Interval**: run a scan every N minutes.
+- **Exact date/time (one-shot)**: choose a calendar date and time. The scan runs once and the schedule auto-disables.
 
 ## 🔌 API Endpoints
 

@@ -7,9 +7,7 @@ from datetime import datetime, timezone
 import threading
 import subprocess
 import json
-import math
-import ipaddress
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import re
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -29,163 +27,24 @@ def _load_environment() -> None:
 
 
 def _configure_logging() -> None:
+	log_file = os.getenv('LOG_FILE', '/opt/netlens/logs/scanner.log')
 	log_level = os.getenv('LOG_LEVEL', 'INFO')
-	preferred = (os.getenv('LOG_FILE') or '').strip() or '/opt/netlens/logs/scanner.log'
-
-	def _is_writable_file(path: str) -> bool:
-		try:
-			parent = os.path.dirname(path) or '.'
-			if os.path.exists(path):
-				return os.access(path, os.W_OK)
-			return os.access(parent, os.W_OK)
-		except Exception:
-			return False
-
-	def _pick_log_file() -> str | None:
-		candidates = []
-		if preferred:
-			candidates.append(preferred)
-		# Fallbacks that are often writable for a service user
-		candidates.extend([
-			'/var/log/netlens/scanner.log',
-			'/tmp/netlens/scanner.log',
-			os.path.join(os.getcwd(), 'scanner.log'),
-		])
-		for cand in candidates:
-			try:
-				os.makedirs(os.path.dirname(cand) or '.', exist_ok=True)
-				if _is_writable_file(cand):
-					return cand
-			except Exception:
-				continue
-		return None
 
 	logger.remove()
 	logger.add(sys.stderr, level=log_level)
-	log_file = _pick_log_file()
-	if not log_file:
-		logger.warning('File logging disabled: no writable LOG_FILE path found')
-		return
-
 	try:
+		os.makedirs(os.path.dirname(log_file), exist_ok=True)
 		logger.add(log_file, rotation='10 MB', retention='14 days', level=log_level)
-		logger.info('File logging enabled at {}', log_file)
 	except Exception:
 		# If file logging fails, keep stderr logging.
-		logger.exception('Failed to configure file logging (LOG_FILE={})', log_file)
-
-
-def _best_effort_reverse_dns(ip: str) -> str | None:
-	try:
-		import socket
-		name, _, _ = socket.gethostbyaddr(ip)
-		name = (name or '').strip()
-		if not name or name == ip:
-			return None
-		return name
-	except Exception:
-		return None
-
-
-def _best_effort_mac_from_neighbor_table(ip: str) -> str | None:
-	"""Try to read MAC from the OS neighbor/ARP cache without raw sockets.
-
-	This can work even when running scans as a non-root service user.
-	"""
-	# 1) iproute2 neighbor table
-	try:
-		p = subprocess.run(['ip', 'neigh', 'show', ip], capture_output=True, text=True, timeout=2)
-		out = (p.stdout or '').strip()
-		# Example: "10.0.0.5 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE"
-		for token in out.split():
-			if token.count(':') == 5 and len(token) >= 17:
-				return token.lower()
-	except Exception:
-		pass
-
-	# 2) /proc/net/arp
-	try:
-		with open('/proc/net/arp', 'r', encoding='utf-8') as f:
-			lines = f.read().splitlines()
-		for line in lines[1:]:
-			parts = line.split()
-			if len(parts) >= 4 and parts[0] == ip:
-				mac = parts[3]
-				if mac and mac != '00:00:00:00:00:00':
-					return mac.lower()
-	except Exception:
-		pass
-
-	return None
-
-
-def _infer_device_type(device: dict) -> str | None:
-	"""Infer a friendly device type for UI grouping.
-
-	Returns one of: router, switch, printer, windows_pc, linux_pc, mac, mobile, server, unknown
-	"""
-	hostname = (device.get('hostname') or '').strip().lower()
-	vendor = (device.get('vendor') or '').strip().lower()
-	os_name = ''
-	os_obj = device.get('os')
-	if isinstance(os_obj, dict):
-		os_name = (os_obj.get('name') or os_obj.get('type') or '').strip().lower()
-	elif isinstance(os_obj, str):
-		os_name = os_obj.strip().lower()
-
-	services = device.get('services') if isinstance(device.get('services'), list) else []
-	open_ports: set[int] = set()
-	for s in services:
-		try:
-			if str(s.get('state') or 'open').lower() != 'open':
-				continue
-			p = s.get('port')
-			if isinstance(p, int):
-				open_ports.add(p)
-		except Exception:
-			continue
-
-	def has_any(substrings: tuple[str, ...], hay: str) -> bool:
-		return any(ss in hay for ss in substrings)
-
-	# Strong hints from hostname/vendor
-	if has_any(('router', 'gateway', 'gw', 'mikrotik', 'openwrt', 'pfsense'), hostname) or has_any(('mikrotik', 'ubiquiti', 'netgear', 'tp-link', 'tplink', 'cisco', 'juniper'), vendor):
-		return 'router'
-	if has_any(('switch',), hostname):
-		return 'switch'
-	if has_any(('printer',), hostname) or 9100 in open_ports or 515 in open_ports or 631 in open_ports:
-		return 'printer'
-	if has_any(('iphone', 'ipad', 'android', 'pixel', 'samsung'), hostname) or has_any(('apple',), vendor) and 62078 in open_ports:
-		return 'mobile'
-
-	# OS hints
-	if has_any(('windows',), os_name) or 3389 in open_ports or 445 in open_ports or 139 in open_ports:
-		return 'windows_pc'
-	if has_any(('mac os', 'os x', 'darwin'), os_name) or has_any(('apple',), vendor):
-		return 'mac'
-	if has_any(('linux', 'unix', 'freebsd', 'openbsd', 'netbsd'), os_name):
-		return 'linux_pc'
-
-	# Service-based hints
-	if 53 in open_ports and (80 in open_ports or 443 in open_ports):
-		return 'router'
-	if 22 in open_ports and (80 in open_ports or 443 in open_ports or 5432 in open_ports or 3306 in open_ports):
-		return 'server'
-	if 80 in open_ports or 443 in open_ports:
-		return 'server'
-
-	return None
+		logger.exception('Failed to configure file logging')
 
 
 def _parse_network_ranges() -> list[str]:
 	raw = os.getenv('NETWORK_RANGES', '').strip()
-	return _parse_network_ranges_raw(raw)
-
-
-def _parse_network_ranges_raw(raw: str | None) -> list[str]:
 	if not raw:
 		return []
-	parts = [p.strip() for p in str(raw).strip().replace(';', ',').split(',')]
+	parts = [p.strip() for p in raw.replace(';', ',').split(',')]
 	return [p for p in parts if p]
 
 
@@ -249,119 +108,20 @@ def _get_schedule_from_db(db):
 	return IntervalTrigger(minutes=interval_minutes)
 
 
-
 def _discover_hosts(ranges: list[str]) -> list[str]:
 	if not ranges:
 		return []
 
 	scanner = nmap.PortScanner()
 	found: set[str] = set()
-
-	is_root = (os.geteuid() == 0) if hasattr(os, 'geteuid') else False
-	if not is_root:
-		logger.warning('Discovery running without root privileges; ARP/MAC discovery may be incomplete')
-
-	discovery_timeout = (os.getenv('DISCOVERY_HOST_TIMEOUT') or '8s').strip() or '8s'
-	discovery_retries = (os.getenv('DISCOVERY_MAX_RETRIES') or '2').strip() or '2'
-	# Ports used for TCP ping discovery (works better than ICMP on some networks).
-	tcp_ports = (os.getenv('DISCOVERY_TCP_PORTS') or '22,80,443,445,3389').strip() or '22,80,443,445,3389'
-
-	# Optional fallback: if discovery returns too few hosts, assume all are up (may be slow).
-	min_hosts_raw = (os.getenv('DISCOVERY_MIN_HOSTS') or '').strip()
-	try:
-		min_hosts = int(min_hosts_raw) if min_hosts_raw else 0
-		min_hosts = max(0, min(4096, min_hosts))
-	except Exception:
-		min_hosts = 0
-	allow_full_sweep = (os.getenv('DISCOVERY_FALLBACK_FULL_SWEEP', '0') or '').strip().lower() in ('1', 'true', 'yes', 'on')
-	max_full_sweep_hosts_raw = (os.getenv('DISCOVERY_FALLBACK_MAX_HOSTS') or '256').strip()
-	try:
-		max_full_sweep_hosts = int(max_full_sweep_hosts_raw)
-		max_full_sweep_hosts = max(1, min(65536, max_full_sweep_hosts))
-	except Exception:
-		max_full_sweep_hosts = 256
-
-	def _ping_host(ip: str, timeout_s: int) -> bool:
-		try:
-			# Linux ping: -c 1 (one packet), -n (numeric), -W seconds (timeout)
-			p = subprocess.run(
-				['ping', '-n', '-c', '1', '-W', str(timeout_s), ip],
-				stdout=subprocess.DEVNULL,
-				stderr=subprocess.DEVNULL,
-				timeout=max(2, timeout_s + 1),
-			)
-			return p.returncode == 0
-		except Exception:
-			return False
-
-	def _ping_sweep(net: str) -> set[str]:
-		# Default: enable ping sweep for better coverage (esp. devices that only answer ICMP).
-		# Can be disabled via DISCOVERY_PING_SWEEP=false.
-		mode = (os.getenv('DISCOVERY_PING_SWEEP', 'true') or '').strip().lower()
-		if mode in ('0', 'false', 'no', 'off'):
-			return set()
-		if mode == 'auto' and is_root:
-			# auto means "only when not root" (root can already do ICMP/ARP via nmap)
-			return set()
-
-		try:
-			n = ipaddress.ip_network(net, strict=False)
-		except Exception:
-			logger.warning('Ping sweep skipped: invalid network {}', net)
-			return set()
-
-		max_hosts_raw = (os.getenv('DISCOVERY_PING_MAX_HOSTS') or '2048').strip()
-		try:
-			max_hosts = int(max_hosts_raw)
-			max_hosts = max(1, min(65536, max_hosts))
-		except Exception:
-			max_hosts = 2048
-
-		hosts = list(n.hosts())
-		if len(hosts) > max_hosts:
-			logger.warning('Ping sweep skipped for {}: {} hosts > DISCOVERY_PING_MAX_HOSTS={}', net, len(hosts), max_hosts)
-			return set()
-
-		timeout_ms_raw = (os.getenv('DISCOVERY_PING_TIMEOUT_MS') or '1000').strip()
-		try:
-			timeout_ms = int(timeout_ms_raw)
-			timeout_ms = max(200, min(5000, timeout_ms))
-		except Exception:
-			timeout_ms = 1000
-		timeout_s = max(1, int(math.ceil(timeout_ms / 1000.0)))
-
-		conc_raw = (os.getenv('DISCOVERY_PING_CONCURRENCY') or '128').strip()
-		try:
-			conc = int(conc_raw)
-			conc = max(8, min(1024, conc))
-		except Exception:
-			conc = 128
-
-		logger.info('Ping sweep {} (hosts={}, timeout={}ms, concurrency={})', net, len(hosts), timeout_ms, conc)
-		up: set[str] = set()
-		with ThreadPoolExecutor(max_workers=conc) as ex:
-			futs = {ex.submit(_ping_host, str(ip), timeout_s): str(ip) for ip in hosts}
-			for fut in as_completed(futs):
-				ip = futs[fut]
-				try:
-					if fut.result():
-						up.add(ip)
-				except Exception:
-					continue
-		logger.info('Ping sweep {}: {} hosts responded', net, len(up))
-		return up
-
 	for net in ranges:
 		try:
 			logger.info('Discovering hosts in {}', net)
-			# Discovery strategy:
-			# - Root + local subnet: use ARP (-PR) for best coverage + MAC/vendor.
-			# - Non-root or non-local: use ICMP + TCP ping to common ports.
-			arp_ok = is_root
-			args_parts = ['-sn', '-PE', f'-PS{tcp_ports}', f'--host-timeout {discovery_timeout}', f'--max-retries {discovery_retries}']
-			if arp_ok:
-				args_parts.insert(1, '-PR')
-			args = ' '.join(args_parts)
+			# Fast, reliable host discovery:
+			# - Use ICMP echo + TCP SYN to common ports
+			# - Prefer ARP on local networks to gather MAC/vendor when possible
+			# - Short timeout to skip unresponsive hosts quickly
+			args = '-sn -PR -PE -PS21,22,23,25,80,443,3389 --host-timeout 3s --max-retries 1'
 			scanner.scan(hosts=net, arguments=args)
 			
 			up_count = 0
@@ -370,189 +130,12 @@ def _discover_hosts(ranges: list[str]) -> list[str]:
 					found.add(host)
 					up_count += 1
 			logger.info('Discovery in {}: {} hosts up', net, up_count)
-
-			# Optional ICMP ping sweep to catch devices that don't respond to TCP probes.
-			# Especially helpful when running without root, because Nmap ICMP (-PE) may be unavailable.
-			try:
-				ping_up = _ping_sweep(net)
-				for ip in ping_up:
-					found.add(ip)
-			except Exception:
-				pass
-
-			# Optional fallback: if discovery returns too few hosts, allow a full sweep.
-			# WARNING: this can be slow on larger CIDRs.
-			if allow_full_sweep and min_hosts > 0 and up_count < min_hosts:
-				logger.warning('Discovery returned {} hosts (<{}). Fallback full sweep enabled for {}', up_count, min_hosts, net)
-				# Only do this for likely small ranges.
-				# For safety, cap at max_full_sweep_hosts by sampling /24-like ranges.
-				# (If user wants bigger, they can increase DISCOVERY_FALLBACK_MAX_HOSTS.)
-				fallback_args = f'-sn -Pn --host-timeout {discovery_timeout} --max-retries {discovery_retries}'
-				# python-nmap will accept CIDR; -Pn will mark all as up.
-				# We cap by only taking first N discovered hosts from output.
-				scanner.scan(hosts=net, arguments=fallback_args)
-				count_added = 0
-				for host in scanner.all_hosts():
-					if count_added >= max_full_sweep_hosts:
-						break
-					found.add(host)
-					count_added += 1
-				logger.info('Fallback sweep added up to {} hosts for {}', count_added, net)
 		except Exception:
 			logger.exception('Host discovery failed for range {}', net)
 	
 	total_found = len(found)
 	logger.info('Discovery complete: {} total hosts up', total_found)
 	return sorted(found)
-
-
-def _start_db_live_log(manager: MongoDBManager, scan_request_id: str):
-	"""Capture scanner logs into scan_requests.live_log (capped).
-
-	This enables the frontend live log even when scans run in the external (root) scanner service.
-	"""
-	if not scan_request_id:
-		return None
-
-	mode = (os.getenv('SCAN_LOG_TO_DB', '1') or '').strip().lower()
-	if mode in ('0', 'false', 'no', 'off'):
-		return None
-
-	try:
-		from bson import ObjectId
-		obj_id = ObjectId(scan_request_id)
-	except Exception:
-		return None
-
-	lock = threading.Lock()
-	buffer: list[dict] = []
-	stop_flag = {'stop': False}
-	last_id = 0
-	last_ms = 0
-	seq = 0
-
-	def make_id(ts_ms: int) -> int:
-		nonlocal last_id, last_ms, seq
-		if ts_ms == last_ms:
-			seq += 1
-		else:
-			last_ms = ts_ms
-			seq = 0
-		# id stays within JS safe integer range
-		last_id = ts_ms * 1000 + seq
-		return last_id
-
-	def sink(message):
-		try:
-			rec = message.record
-			ts = rec.get('time')
-			ts_dt = ts.datetime.replace(tzinfo=timezone.utc) if ts else datetime.now(timezone.utc)
-			ts_ms = int(ts_dt.timestamp() * 1000)
-			level = rec.get('level').name if rec.get('level') else 'INFO'
-			# Use formatted output so exception traces are included.
-			formatted = str(message).rstrip('\n')
-			if not formatted:
-				return
-			lines = formatted.splitlines() or ['']
-			entries = []
-			for line in lines:
-				line = str(line).rstrip('\n')
-				if not line:
-					continue
-				entries.append({
-					'id': make_id(ts_ms),
-					'ts': ts_dt.isoformat(),
-					'stream': 'scanner',
-					'level': level,
-					'text': line,
-				})
-			if not entries:
-				return
-			with lock:
-				buffer.extend(entries)
-		except Exception:
-			return
-
-	def flusher():
-		while not stop_flag['stop']:
-			try:
-				batch = None
-				with lock:
-					if buffer:
-						batch = buffer[:]
-						buffer.clear()
-				if batch:
-					manager.db.get_collection('scan_requests').update_one(
-						{'_id': obj_id},
-						{
-							'$push': {
-								'live_log': {
-									'$each': batch,
-									'$slice': -2000,
-								}
-							},
-							'$set': {
-								'live_log_last_id': batch[-1]['id'],
-								'updated_at': datetime.now(timezone.utc),
-							},
-						},
-					)
-			except Exception:
-				pass
-			time.sleep(0.5)
-
-	thread = threading.Thread(target=flusher, daemon=True)
-	thread.start()
-
-	# Write an initial line immediately so the UI doesn't look broken.
-	try:
-		init_ts = datetime.now(timezone.utc)
-		init_ms = int(init_ts.timestamp() * 1000)
-		init_entry = {
-			'id': make_id(init_ms),
-			'ts': init_ts.isoformat(),
-			'stream': 'scanner',
-			'level': 'INFO',
-			'text': 'Live log attached (MongoDB)',
-		}
-		manager.db.get_collection('scan_requests').update_one(
-			{'_id': obj_id},
-			{
-				'$push': {
-					'live_log': {
-						'$each': [init_entry],
-						'$slice': -2000,
-					}
-				},
-				'$set': {
-					'live_log_last_id': init_entry['id'],
-					'updated_at': datetime.now(timezone.utc),
-				},
-			},
-		)
-	except Exception:
-		pass
-
-	try:
-		# Include exceptions in formatted output.
-		# Use a dedicated log level so DB live logs don't disappear when LOG_LEVEL is set high.
-		fmt = '{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | {message}{exception}'
-		db_level = (os.getenv('SCAN_LOG_DB_LEVEL') or '').strip() or 'INFO'
-		sink_id = logger.add(sink, level=db_level, format=fmt)
-	except Exception:
-		stop_flag['stop'] = True
-		return None
-
-	def stop():
-		try:
-			stop_flag['stop'] = True
-			# Flush any remaining lines
-			time.sleep(0.6)
-			logger.remove(sink_id)
-		except Exception:
-			pass
-
-	return stop
 
 
 def _local_ipv4_addresses() -> list[str]:
@@ -645,16 +228,18 @@ def _update_scan_request_progress(db, scan_request_id: str, update: dict) -> Non
 		return
 
 
-def _scan_host(ip: str, scan_at: datetime, options: dict | None = None) -> dict:
+def _scan_host(ip: str, scan_at: datetime) -> dict:
 	is_root = (os.geteuid() == 0) if hasattr(os, 'geteuid') else False
 	scanner = nmap.PortScanner()
-	options = options if isinstance(options, dict) else {}
 
-	# Thorough scan by default; can be overridden via request options or SCAN_NMAP_ARGS.
-	override = (str(options.get('nmap_args')).strip() if options.get('nmap_args') is not None else (os.getenv('SCAN_NMAP_ARGS') or '').strip())
-	top_ports = str(options.get('top_ports')).strip() if options.get('top_ports') is not None else os.getenv('SCAN_TOP_PORTS', '1000')
-	host_timeout = str(options.get('host_timeout')).strip() if options.get('host_timeout') is not None else os.getenv('SCAN_HOST_TIMEOUT', '120s')
-	max_retries = str(options.get('max_retries')).strip() if options.get('max_retries') is not None else os.getenv('SCAN_MAX_RETRIES', '2')
+	# Thorough scan by default; can be overridden via SCAN_NMAP_ARGS.
+	override = (os.getenv('SCAN_NMAP_ARGS') or '').strip()
+	# Optional: NSE script selectors (e.g. "vuln" or "vuln or safe").
+	# Empty/"off" disables adding a --script arg automatically.
+	nmap_scripts = (os.getenv('SCAN_NMAP_SCRIPTS') or '').strip()
+	top_ports = os.getenv('SCAN_TOP_PORTS', '1000')
+	host_timeout = os.getenv('SCAN_HOST_TIMEOUT', '120s')
+	max_retries = os.getenv('SCAN_MAX_RETRIES', '2')
 	try:
 		top_ports_n = max(1, min(65535, int(top_ports)))
 		max_retries_n = max(0, min(10, int(max_retries)))
@@ -674,16 +259,25 @@ def _scan_host(ip: str, scan_at: datetime, options: dict | None = None) -> dict:
 		# Non-root: no SYN scan. Still do service/version detection.
 		args = f'-sT -sV --version-all --reason --top-ports {top_ports} -T4 --host-timeout {host_timeout} --max-retries {max_retries}'
 
+	# Add vulnerability scripts unless the operator overrides args entirely.
+	# Default is "vuln" to surface CVEs/known issues, but allow disabling.
+	if not override:
+		if not nmap_scripts:
+			nmap_scripts = 'vuln'
+		if nmap_scripts.lower() not in ('0', 'off', 'false', 'disable', 'disabled', 'none'):
+			if '--script' not in args:
+				args = f'{args} --script {nmap_scripts}'
+
 	# For per-host scans (we already "discovered" the host), skip host discovery
 	# to avoid false negatives when ICMP/TCP probes are filtered.
-	assume_up = (str(options.get('assume_up')).strip().lower() if options.get('assume_up') is not None else (os.getenv('SCAN_ASSUME_UP', '1') or '').strip().lower())
+	assume_up = (os.getenv('SCAN_ASSUME_UP', '1') or '').strip().lower()
 	# However, on local subnets ARP-based discovery also yields MAC/vendor.
 	# So only force -Pn when the target doesn't look local.
 	if assume_up not in ('0', 'false', 'no', 'off') and '-Pn' not in args and not _is_same_subnet_24(ip):
 		args = f'{args} -Pn'
 
 	# Optional: let operators cap script runtime (helps on fragile networks).
-	script_timeout = (str(options.get('script_timeout')).strip() if options.get('script_timeout') is not None else (os.getenv('SCAN_SCRIPT_TIMEOUT') or '').strip())
+	script_timeout = (os.getenv('SCAN_SCRIPT_TIMEOUT') or '').strip()
 	if script_timeout and '--script-timeout' not in args:
 		args = f'{args} --script-timeout {script_timeout}'
 
@@ -729,17 +323,10 @@ def _scan_host(ip: str, scan_at: datetime, options: dict | None = None) -> dict:
 		device_data['ipv4_address'] = addresses.get('ipv4') or device_data.get('ip_address')
 		device_data['ipv6_address'] = addresses.get('ipv6')
 
-		if not device_data.get('mac_address'):
-			device_data['mac_address'] = _best_effort_mac_from_neighbor_table(ip)
-
 		hostnames = host.get('hostnames', [])
 		if hostnames:
 			device_data['hostname'] = hostnames[0].get('name') or device_data.get('hostname')
 		device_data['hostnames'] = [h.get('name') for h in hostnames if h.get('name')]
-		if not device_data.get('hostname'):
-			rdns = _best_effort_reverse_dns(ip)
-			if rdns:
-				device_data['hostname'] = rdns
 
 		vendor = host.get('vendor', {})
 		if device_data.get('mac_address') and device_data['mac_address'] in vendor:
@@ -774,6 +361,33 @@ def _scan_host(ip: str, scan_at: datetime, options: dict | None = None) -> dict:
 			device_data.setdefault('security', {})
 			device_data['security']['open_ports_count'] = len({(s['protocol'], s['port']) for s in services})
 
+		# Extract CVEs from NSE script output (service-level + host-level).
+		# Note: NSE scripts often print "IDs: CVE:..." or include CVE strings inline.
+		cve_set: set[str] = set()
+		try:
+			# Host scripts:
+			for hs in host.get('hostscript') or []:
+				out = (hs.get('output') or '') if isinstance(hs, dict) else str(hs)
+				for c in re.findall(r'\bCVE-\d{4}-\d{4,7}\b', out, flags=re.IGNORECASE):
+					cve_set.add(c.upper())
+		except Exception:
+			pass
+		try:
+			# Service scripts:
+			for svc in services:
+				scripts = svc.get('scripts') or {}
+				if not isinstance(scripts, dict):
+					continue
+				for out in scripts.values():
+					for c in re.findall(r'\bCVE-\d{4}-\d{4,7}\b', str(out), flags=re.IGNORECASE):
+						cve_set.add(c.upper())
+		except Exception:
+			pass
+		if cve_set:
+			device_data.setdefault('security', {})
+			device_data['security']['cves'] = sorted(cve_set)
+			device_data['security']['cve_count'] = len(cve_set)
+
 		# OS / device type info (when available)
 		try:
 			if host.get('osmatch'):
@@ -799,12 +413,8 @@ def _scan_host(ip: str, scan_at: datetime, options: dict | None = None) -> dict:
 			pass
 
 		# Very basic heuristic if no OS type was found
-		if not device_data.get('device_type'):
-			inferred = _infer_device_type(device_data)
-			if inferred:
-				device_data['device_type'] = inferred
-			elif any(s.get('name') in ('http', 'https') for s in services):
-				device_data['device_type'] = 'server'
+		if not device_data.get('device_type') and any(s.get('name') in ('http', 'https') for s in services):
+			device_data['device_type'] = 'server'
 
 		device_data.setdefault('connection_method', 'unknown')
 
@@ -814,21 +424,13 @@ def _scan_host(ip: str, scan_at: datetime, options: dict | None = None) -> dict:
 		return device_data
 
 
-
-def run_scan(
-	manager: MongoDBManager,
-	reason: str,
-	network_ranges: list[str] | None = None,
-	options: dict | None = None,
-	scan_request_id: str | None = None,
-) -> dict:
-	ranges = network_ranges if network_ranges is not None else _parse_network_ranges()
+def run_scan(manager: MongoDBManager, reason: str) -> dict:
+	ranges = _parse_network_ranges()
 	if not ranges:
 		logger.warning('NETWORK_RANGES is empty; no scan performed')
 		return {'reason': reason, 'error': 'NETWORK_RANGES is empty'}
 
-	scan_request_id = scan_request_id or _get_scan_request_id()
-	stop_live_log = _start_db_live_log(manager, scan_request_id) if scan_request_id else None
+	scan_request_id = _get_scan_request_id()
 	scan_id = uuid.uuid4().hex
 	record_id = manager.create_scan_record({
 		'scan_id': scan_id,
@@ -856,11 +458,7 @@ def run_scan(
 
 	started = datetime.now(timezone.utc)
 	scan_at = started
-	try:
-		discovered = _discover_hosts(ranges)
-	finally:
-		# Ensure early discovery logs get flushed
-		pass
+	discovered = _discover_hosts(ranges)
 	current_ips: list[str] = []
 	devices_snapshot: list[dict] = []
 
@@ -898,7 +496,7 @@ def run_scan(
 	})
 
 	for idx, ip in enumerate(discovered, start=1):
-		device = _scan_host(ip, scan_at=scan_at, options=options)
+		device = _scan_host(ip, scan_at=scan_at)
 		# Sanitize device data to ensure all keys are strings for MongoDB
 		device = _sanitize_for_mongodb(device)
 		current_ips.append(ip)
@@ -945,11 +543,7 @@ def run_scan(
 	})
 
 	logger.info('Scan complete: {}', stats)
-	try:
-		return {'scan_id': scan_id, 'status': 'completed', 'statistics': stats}
-	finally:
-		if stop_live_log:
-			stop_live_log()
+	return {'scan_id': scan_id, 'status': 'completed', 'statistics': stats}
 
 
 def _claim_pending_scan_request(db):
@@ -1034,51 +628,13 @@ def main() -> int:
 	last_schedule_check = 0.0
 	try:
 		while True:
-			# Heartbeat so the API can detect that the privileged scanner is alive.
-			try:
-				manager.db.get_collection('settings').update_one(
-					{'_id': 'scanner_heartbeat'},
-					{'$set': {
-						'updated_at': datetime.now(timezone.utc),
-						'pid': os.getpid(),
-						'uid': (os.geteuid() if hasattr(os, 'geteuid') else None),
-						'run_once': bool(run_once),
-					}},
-					upsert=True,
-				)
-			except Exception:
-				pass
-
 			# Poll scan requests from API/UI
 			req = _claim_pending_scan_request(manager.db)
 			if req:
 				req_id = str(req.get('_id'))
 				logger.info('Picked up scan request {}', req_id)
 				try:
-					raw_ranges = req.get('network_ranges')
-					override_ranges = _parse_network_ranges_raw(raw_ranges)
-					options = req.get('options') if isinstance(req.get('options'), dict) else None
-
-					# Ensure UI sees the requested ranges even when scanner is daemonized.
-					if override_ranges:
-						_update_scan_request_progress(manager.db, req_id, {
-							'network_ranges': ', '.join(override_ranges),
-						})
-
-					# Run scan with request-specific overrides.
-					if not scan_lock.acquire(blocking=False):
-						raise RuntimeError('Scan already running')
-					try:
-						result = run_scan(
-							manager,
-							reason='manual_request',
-							network_ranges=(override_ranges or None),
-							options=options,
-							scan_request_id=req_id,
-						)
-					finally:
-						scan_lock.release()
-
+					result = run_scan_guarded(reason='manual_request')
 					logger.info('Manual scan request completed: {}', result)
 					manager.db.get_collection('scan_requests').update_one(
 						{'_id': req['_id']},

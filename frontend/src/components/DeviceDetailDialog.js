@@ -110,6 +110,12 @@ export default function DeviceDetailDialog({ open, onClose, deviceIp, device: de
   const services = Array.isArray(device?.services) ? device.services : [];
   const openPortsCount = device?.security?.open_ports_count ?? (Array.isArray(device?.services) ? device.services.length : null);
 
+  const cves = Array.isArray(device?.security?.cves) ? device.security.cves : [];
+  const cveCountRaw = device?.security?.cve_count;
+  const cveCount = Number.isFinite(Number(cveCountRaw)) ? Number(cveCountRaw) : (cves.length || 0);
+
+  const previousIps = Array.isArray(device?.previous_ips) ? device.previous_ips.filter(Boolean) : [];
+
   const connectionLabel =
     device?.connection_method ||
     device?.connection?.type ||
@@ -153,6 +159,9 @@ export default function DeviceDetailDialog({ open, onClose, deviceIp, device: de
           {Number.isFinite(Number(openPortsCount)) && (
             <Chip label={`Open ports: ${openPortsCount}`} size="small" color="warning" variant="outlined" />
           )}
+          {Number.isFinite(Number(cveCount)) && cveCount > 0 && (
+            <Chip label={`CVEs: ${cveCount}`} size="small" color="error" variant="outlined" />
+          )}
         </Box>
       </DialogTitle>
 
@@ -178,6 +187,19 @@ export default function DeviceDetailDialog({ open, onClose, deviceIp, device: de
                 { label: 'IP address', value: <Typography sx={{ fontFamily: 'monospace' }}>{safeToString(device.ip_address || deviceIp)}</Typography> },
                 { label: 'Hostname', value: safeToString(device.hostname) },
                 { label: 'MAC address', value: <Typography sx={{ fontFamily: 'monospace' }}>{safeToString(device.mac_address)}</Typography> },
+                {
+                  label: 'Previously known IPs',
+                  value:
+                    previousIps.length > 0 ? (
+                      <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                        {previousIps.map((ip) => (
+                          <Chip key={ip} label={ip} size="small" variant="outlined" sx={{ fontFamily: 'monospace' }} />
+                        ))}
+                      </Box>
+                    ) : (
+                      '—'
+                    ),
+                },
                 { label: 'Vendor', value: safeToString(device.vendor) },
                 { label: 'Device type', value: safeToString(device.device_type) },
                 { label: 'OS', value: osLabel ? safeToString(osLabel) : '—' },
@@ -189,8 +211,43 @@ export default function DeviceDetailDialog({ open, onClose, deviceIp, device: de
                 { label: 'Uptime (seconds)', value: device.uptime_seconds ?? '—' },
                 { label: 'Response time (ms)', value: device.response_time_ms ?? '—' },
                 { label: 'Open ports count', value: openPortsCount ?? '—' },
+                { label: 'CVE count', value: Number.isFinite(Number(cveCount)) ? cveCount : '—' },
               ]}
             />
+
+            <Divider sx={{ my: 2 }} />
+
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>Security</Typography>
+            {cveCount <= 0 ? (
+              <Typography variant="body2" color="text.secondary">No CVEs recorded.</Typography>
+            ) : (
+              <Box>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                  Detected CVEs from NSE script output (best-effort): {cveCount}
+                </Typography>
+                <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                  {cves.slice(0, 200).map((c) => (
+                    <Chip
+                      key={c}
+                      label={c}
+                      size="small"
+                      color="error"
+                      variant="outlined"
+                      component="a"
+                      href={`https://nvd.nist.gov/vuln/detail/${encodeURIComponent(c)}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      clickable
+                    />
+                  ))}
+                </Box>
+                {cves.length > 200 && (
+                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                    Showing first 200 CVEs.
+                  </Typography>
+                )}
+              </Box>
+            )}
 
             <Divider sx={{ my: 2 }} />
 

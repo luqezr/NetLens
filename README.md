@@ -2,15 +2,15 @@
 
 A comprehensive network scanning and monitoring solution that continuously discovers, identifies, and tracks all devices on your network.
 
-## 🌟 Features
+## Features
 
-- **Automated Network Discovery**: Scans network every hour to discover all connected devices
-- **Device Identification**: Identifies device type, OS, vendor, and running services
-- **Connection Detection**: Detects wired vs wireless connections
-- **Real-time Dashboard**: Web-based interface showing network topology and device stats
-- **Alert System**: Notifications for new devices, offline devices, and security concerns
-- **Network Topology Visualization**: Visual representation of network connections
-- **RESTful API**: Complete API for integration with other systems
+- **Device inventory**: IP, MAC (when available), vendor, OS guess, services/ports, and last-seen tracking
+- **Vulnerability surfacing (best-effort)**: Extracts CVEs from Nmap NSE script output and shows them in the UI (Vulnerabilities column + CVE list)
+- **Scheduling**: Interval scans, exact one-shot scans, and recurring **daily/weekly** schedules
+- **Scan history + live log**: View recent scans, per-scan device snapshots, and a streaming live log
+- **Identity over time**: Tracks IP changes for a device (keeps `previous_ips` when MAC identity stays stable)
+- **Topology + alerts**: Visual network graph plus alerts for notable events
+- **REST API**: Device, scan, stats, alerts, and topology endpoints for integrations
 
 ## 🛠️ Technology Stack
 
@@ -50,16 +50,55 @@ cd NetLens
 sudo ./install.sh
 
 # Edit configuration
-sudo nano /opt/netscanner/config.env
+sudo nano /opt/netlens/config.env
 # Update NETWORK_RANGES with your network subnets
 
 # Restart services
-sudo systemctl restart netlensscan.service netlens.service
+sudo systemctl restart netlensscan.service
 ```
 
-Note: the installer installs the systemd units `netlensscan.service` (API) and `netlens.service` (scanner).
-During install, you can choose whether to enable/start them immediately.
-If you run `npm start` in this repo after installing, you will likely see `EADDRINUSE` because the service is already listening.
+Notes:
+
+- The installer deploys to `/opt/netlens`.
+- The API service is `netlensscan.service`.
+- The scanner service is `netlens.service` (runs as root for better OS/MAC discovery).
+- The production React frontend is built during install and served by the API on the same port (default `http://localhost:5000/`).
+
+## 🔄 Updating NetLens (update.sh)
+
+NetLens includes an in-place updater script, designed for the common workflow:
+
+1) Download a newer NetLens repo copy (or `git pull`)
+2) Run the updater
+3) Keep your existing database/users/config/logs
+
+From the NetLens repo folder:
+
+```bash
+sudo ./update.sh
+```
+
+If the repo folder is a git checkout and you want the script to pull the newest commit first:
+
+```bash
+sudo ./update.sh --pull
+```
+
+What `update.sh` does:
+
+- Stops `netlensscan.service` and `netlens.service`
+- Syncs new application files into `/opt/netlens`
+- Preserves local state:
+   - `/opt/netlens/config.env`
+   - `/opt/netlens/logs/`
+   - `/opt/netlens/venv/`
+   - `/opt/netlens/certs/` (TLS material)
+- Reinstalls dependencies and rebuilds the React frontend
+- Restarts services
+
+Safety behavior:
+
+- If the frontend build fails, it restores the previous `frontend/build` so the UI doesn’t go blank.
 
 To run the API manually for development:
 - Stop the service: `sudo systemctl stop netlensscan.service`
@@ -78,8 +117,9 @@ During install you will be prompted for:
 - Whether to generate a self-signed OpenSSL certificate for HTTPS
 
 Scanner behavior:
-- Scans are triggered by the API server (via the UI or schedule settings).
-- The installer does **not** start `netlens.service` by default.
+- Scans are typically triggered by the API (UI “Run Scan Now” or schedule settings), via a MongoDB queue (`scan_requests`).
+- `netlens.service` can also pick up queued scan requests and run with elevated privileges.
+- Important: avoid running multiple scan workers simultaneously unless you intentionally want parallel scan execution.
 
 Stop everything:
 ```bash
@@ -96,7 +136,7 @@ sudo ./scripts/netlens-manager.sh
 ## 📁 Project Structure
 
 ```
-Network Collector/
+NetLens/
 ├── scanner_service.py      # Python scanning service
 ├── database/
 │   └── mongo_manager.py    # MongoDB operations
@@ -108,7 +148,7 @@ Network Collector/
 │   └── alerts.js           # Alert management endpoints
 ├── models/
 │   └── Device.js           # Device data model
-├── frontend/               # React frontend (to be created)
+├── frontend/               # React frontend (CRA)
 ├── config.env              # Configuration file
 ├── requirements.txt        # Python dependencies
 ├── package.json            # Node.js dependencies
@@ -117,7 +157,7 @@ Network Collector/
 
 ## ⚙️ Configuration
 
-Edit `/opt/netscanner/config.env`:
+Edit `/opt/netlens/config.env`:
 
 ```env
 # MongoDB Configuration
@@ -126,7 +166,14 @@ MONGO_DB_NAME=netlens
 
 # Network Settings - Update with your network ranges
 NETWORK_RANGES=192.168.1.0/24,10.0.0.0/24
-SCAN_SCHEDULE=*/60 * * * *  # Every hour
+
+# Scheduled scans (legacy scanner-only mode)
+# The UI scheduler is configured via the web UI and stored in MongoDB.
+# SCAN_SCHEDULE is still supported by the standalone scanner service as:
+#   - disabled/off
+#   - integer minutes (e.g. 60)
+#   - 5-field cron (m h dom mon dow)
+SCAN_SCHEDULE=disabled
 
 # Nmap scan tuning
 # By default, NetLens adds "--script vuln" to per-host scans (unless you fully override args).
@@ -138,6 +185,12 @@ SCAN_SCHEDULE=*/60 * * * *  # Every hour
 #   SCAN_NMAP_ARGS=-sS -A --top-ports 1000 -T4 -Pn
 # and optionally cap NSE runtime:
 #   SCAN_SCRIPT_TIMEOUT=120s
+
+# Additional scan knobs (optional)
+# SCAN_TOP_PORTS=1000
+# SCAN_HOST_TIMEOUT=120s
+# SCAN_MAX_RETRIES=2
+# SCAN_ASSUME_UP=1
 
 # API Settings
 PORT=5000
@@ -157,12 +210,21 @@ Notes:
 - Running vulnerability scripts can be slower and may trigger IDS/IPS alerts.
 - If you see timeouts, set `SCAN_SCRIPT_TIMEOUT` to a higher value or disable scripts with `SCAN_NMAP_SCRIPTS=off`.
 
+UI behavior:
+
+- Devices table includes a **Vulnerabilities** indicator (✅ when none recorded, ❌ when CVEs exist).
+- Device details show the detected CVE list (clickable links to NVD).
+
 ### Scheduled scans
 
-The UI supports two schedule modes:
+The UI supports these schedule modes:
 
 - **Interval**: run a scan every N minutes.
-- **Exact date/time (one-shot)**: choose a calendar date and time. The scan runs once and the schedule auto-disables.
+- **Exact date/time (one-shot)**: choose a calendar date and time.
+- **Daily**: run at a specific local time every day.
+- **Weekly**: run on selected weekdays at a specific local time.
+
+The “Next 10 occurrences” list is computed from the actual next scheduled run time (so it doesn’t drift as the page refreshes).
 
 ## 🔌 API Endpoints
 
@@ -185,39 +247,16 @@ The UI supports two schedule modes:
 ### Health
 - `GET /health` - Service health check
 
-## 🎨 Frontend Setup (Next Step)
+## 🎨 Frontend
 
-For the best experience, I recommend:
+NetLens ships with a React frontend in `frontend/`.
 
-### Option 1: React + Material-UI + React Flow (Recommended)
-```bash
-cd /opt/netscanner
-npx create-react-app frontend
-cd frontend
-npm install @mui/material @emotion/react @emotion/styled
-npm install reactflow
-npm install recharts axios
-```
-
-### Option 2: Next.js (For production-ready app)
-```bash
-cd /opt/netscanner
-npx create-next-app@latest frontend
-cd frontend
-npm install @mui/material reactflow recharts axios
-```
-
-### Option 3: Vue.js + Element Plus
-```bash
-cd /opt/netscanner
-npm create vue@latest frontend
-cd frontend
-npm install element-plus vue-flow-form echarts
-```
+- Production installs: the installer builds the frontend and the API serves it from `/`.
+- Development: run `npm start` in `frontend/` and point `CORS_ORIGIN` at the dev server if needed.
 
 ## 📊 Dashboard Features
 
-The frontend will display:
+The web UI includes:
 
 1. **Overview Dashboard**
    - Total devices (online/offline)
@@ -228,8 +267,9 @@ The frontend will display:
 2. **Device List**
    - Searchable/filterable table
    - Device details: IP, MAC, hostname, vendor, OS
-   - Connection type (wired/wireless)
+   - Connection type estimate (wired/wireless/unknown)
    - Last seen timestamp
+   - Vulnerabilities indicator + CVE details (when available)
 
 3. **Network Topology**
    - Interactive network graph
@@ -254,47 +294,91 @@ The frontend will display:
 4. **HTTPS**: Use the installer-generated cert for testing, or a real cert in production
 5. **Permissions**: Scanner runs as root (raw sockets), API runs as limited user
 
-## 🔧 Troubleshooting
+## 🔐 Strongly Recommended: Enable MongoDB Authentication
 
-### Scans miss devices / only a few hosts discovered
+Running MongoDB without authentication is convenient for local testing, but it is not recommended for real deployments.
+For better safety, enable MongoDB auth and restrict network exposure.
 
-This almost always happens when scans are executed **without root privileges**.
+### Step 1: Create an admin user (if you don’t already have one)
 
-- **Full device discovery (especially MAC/vendor via ARP) requires root.**
-- If the API service (`netlensscan.service`) runs as user `netlens` and executes scans itself, Nmap host discovery will rely on ICMP/TCP probes and can miss devices that don't respond.
-
-Recommended fix (production): run the dedicated scanner service (root) and let it pick up queued scan requests:
+If MongoDB auth is currently disabled, you can still create users.
 
 ```bash
-sudo systemctl enable --now netlens.service
+mongosh
+use admin
+db.createUser({
+   user: "myMongoDBAdmin",
+   pwd: "<STRONG_PASSWORD>",
+   roles: [
+      { role: "userAdminAnyDatabase", db: "admin" },
+      { role: "dbAdminAnyDatabase", db: "admin" }
+   ]
+})
+```
+
+Installer note:
+
+- If you answered **No** to “Does MongoDB require authentication?”, the installer will now optionally generate this admin user for you with a random password and store it in `/opt/netlens/summary.txt`.
+
+### Step 2: Enable authorization in MongoDB
+
+Edit your MongoDB config (commonly `/etc/mongod.conf`) and enable authorization:
+
+```yaml
+security:
+   authorization: enabled
+```
+
+Then restart MongoDB:
+
+```bash
+sudo systemctl restart mongod || sudo systemctl restart mongodb
+```
+
+### Step 3: Create (or keep) the NetLens application user
+
+NetLens uses a dedicated user for the `netlens` database. Create one (or reuse the one from `summary.txt`):
+
+```bash
+mongosh --username myMongoDBAdmin --password '<ADMIN_PASSWORD>' --authenticationDatabase admin
+use netlens
+db.createUser({
+   user: "netlens_app_user",
+   pwd: "<APP_PASSWORD>",
+   roles: [{ role: "readWrite", db: "netlens" }]
+})
+```
+
+### Step 4: Update NetLens config.env
+
+Update `/opt/netlens/config.env`:
+
+```env
+MONGO_URI=mongodb://netlens_app_user:<APP_PASSWORD>@localhost:27017/netlens
+```
+
+Then restart the API:
+
+```bash
 sudo systemctl restart netlensscan.service
 ```
 
-NetLens uses a MongoDB queue (`scan_requests`). When `netlens.service` is running, the API will detect it (via a heartbeat) and **will not run scans inside the API process**.
+### Extra hardening tips
 
-Optional discovery tuning (in `/opt/netlens/config.env`):
+- Bind MongoDB to localhost only unless you explicitly need remote access (`bindIp: 127.0.0.1`).
+- Use a firewall to prevent untrusted network access to port 27017.
 
-```env
-# Host discovery tuning
-DISCOVERY_HOST_TIMEOUT=8s
-DISCOVERY_MAX_RETRIES=2
-DISCOVERY_TCP_PORTS=22,80,443,445,3389
+## 🔧 Troubleshooting
 
-# Optional: add a real ICMP ping sweep using the system `ping` command.
-# This can discover devices that don't answer TCP probes. Useful when scans run unprivileged.
-DISCOVERY_PING_SWEEP=auto   # auto|true|false (auto enables only when not root)
-DISCOVERY_PING_TIMEOUT_MS=1000
-DISCOVERY_PING_CONCURRENCY=128
-DISCOVERY_PING_MAX_HOSTS=2048
+### MAC address and vendor are missing
 
-# Optional fallback (can be slower): if discovery finds fewer than N hosts,
-# do a full sweep assuming hosts are up (use with care).
-DISCOVERY_MIN_HOSTS=10
-DISCOVERY_FALLBACK_FULL_SWEEP=false
-DISCOVERY_FALLBACK_MAX_HOSTS=256
-```
+MAC addresses are only available when the scanner can observe L2 neighbor information (same broadcast domain / ARP visibility). Common reasons you won’t get MAC/vendor:
 
-Note: it's possible for a device to respond to `ping <ip>` from your laptop, but still be missed by Nmap discovery if the scan is running as a different user/service without raw-socket privileges (ICMP/ARP limitations) and the device doesn't respond to the configured TCP ping ports.
+- Target is on a different VLAN/subnet behind routing
+- ARP is blocked/filtered
+- Scan runs without enough privileges (ARP/raw-socket limitations)
+
+NetLens does a best-effort MAC vendor lookup using Nmap’s OUI database when a MAC is available.
 
 ### Scan crashes with DuplicateKeyError on mac_address
 
@@ -323,9 +407,9 @@ sudo systemctl status netlensscan.service
 
 ### View logs
 ```bash
-sudo tail -f /opt/netscanner/logs/scanner.log
-sudo journalctl -u netscanner -f
-sudo journalctl -u api -f
+sudo tail -f /opt/netlens/logs/scanner.log
+sudo journalctl -u netlensscan -f
+sudo journalctl -u netlens -f
 ```
 
 ### Test API
@@ -337,17 +421,15 @@ curl http://localhost:5000/api/devices
 
 ### Manual scan
 ```bash
-sudo python3 /opt/netscanner/scanner_service.py
-OR 
 sudo /opt/netlens/venv/bin/python /opt/netlens/scanner_service.py --run-once
 ```
 
 ## 📈 Performance
 
-- Scans ~100 devices in 5-10 minutes
-- Low CPU usage between scans
-- MongoDB indexes for fast queries
-- Hourly scans (configurable)
+- Scan duration depends on host count, enabled NSE scripts, and port selection.
+- Low CPU usage between scans; scanning is the dominant workload.
+- MongoDB indexes keep device/scan queries fast.
+- Scheduling is configurable (interval, exact one-shot, daily, weekly).
 
 ## 🤝 Contributing
 

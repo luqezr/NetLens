@@ -74,6 +74,8 @@ export default function ScanDetail() {
                       <TableRow>
                         <TableCell>Device</TableCell>
                         <TableCell>IP</TableCell>
+                        <TableCell sx={{ display: { xs: 'none', lg: 'table-cell' } }}>MAC</TableCell>
+                        <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>OS</TableCell>
                         <TableCell>Status</TableCell>
                         <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>Type</TableCell>
                         <TableCell align="right">Open Ports</TableCell>
@@ -85,6 +87,7 @@ export default function ScanDetail() {
                       {scan.devices.map((d, idx) => {
                         const hostname = d?.hostname || (Array.isArray(d?.hostnames) ? d.hostnames[0] : null);
                         const openPorts = d?.security?.open_ports_count ?? (Array.isArray(d?.services) ? d.services.length : '—');
+                        const osLabel = d?.os?.family || d?.os?.name || d?.os?.type || (typeof d?.os === 'string' ? d.os : null);
 
                         return (
                           <TableRow
@@ -98,6 +101,8 @@ export default function ScanDetail() {
                           >
                             <TableCell sx={{ fontWeight: 700 }}>{hostname || d?.ip_address || '—'}</TableCell>
                             <TableCell sx={{ fontFamily: 'monospace' }}>{d?.ip_address || '—'}</TableCell>
+                            <TableCell sx={{ display: { xs: 'none', lg: 'table-cell' }, fontFamily: 'monospace' }}>{d?.mac_address || '—'}</TableCell>
+                            <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>{osLabel || '—'}</TableCell>
                             <TableCell>
                               <Chip
                                 label={d?.status || '—'}

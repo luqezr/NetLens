@@ -161,6 +161,8 @@ app.get('/health', (req, res) => {
 // Optional: serve the React build from the same server (useful for production installs)
 function resolveFrontendBuildDir() {
   const candidates = [
+    '/opt/netlens/frontend/build',
+    // Back-compat with older installs
     '/opt/netscanner/frontend/build',
     path.join(__dirname, 'frontend', 'build'),
   ];
@@ -173,10 +175,20 @@ function resolveFrontendBuildDir() {
 const frontendBuildDir = resolveFrontendBuildDir();
 if (frontendBuildDir) {
   console.log(`✅ Serving frontend from ${frontendBuildDir}`);
-  app.use(express.static(frontendBuildDir));
+  app.use(
+    express.static(frontendBuildDir, {
+      setHeaders: (res, filePath) => {
+        // Avoid sticky UI after upgrades (index.html should not be cached aggressively)
+        if (filePath && filePath.endsWith('index.html')) {
+          res.setHeader('Cache-Control', 'no-store');
+        }
+      },
+    })
+  );
 
   // SPA fallback: let React Router handle client-side routes
   app.get(/^\/(?!api\/|health$).*/, (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     res.sendFile(path.join(frontendBuildDir, 'index.html'));
   });
 }

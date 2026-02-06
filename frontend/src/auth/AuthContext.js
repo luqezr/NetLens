@@ -28,9 +28,14 @@ export function AuthProvider({ children }) {
     refresh();
   }, []);
 
-  const login = async (username, password) => {
+  const login = async (username, password, options = {}) => {
     const res = await apiLogin({ username, password });
-    setUser(res.data?.data?.user || null);
+    const nextUser = res.data?.data?.user || null;
+    const deferMs = Number(options?.deferSetUserMs) || 0;
+    if (deferMs > 0) {
+      await new Promise((r) => setTimeout(r, Math.min(2000, Math.max(0, deferMs))));
+    }
+    setUser(nextUser);
     return res;
   };
 

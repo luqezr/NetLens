@@ -23,6 +23,8 @@ import {
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import SearchIcon from '@mui/icons-material/Search';
+import CheckCircleIcon from '@mui/icons-material/CheckCircle';
+import CancelIcon from '@mui/icons-material/Cancel';
 import { getDevices } from '../services/api';
 import DeviceDetailDialog from './DeviceDetailDialog';
 
@@ -41,7 +43,7 @@ function getOsLabel(device) {
   const os = device?.os;
   if (!os) return '—';
   if (typeof os === 'string') return os;
-  return os.type || os.name || os.family || '—';
+  return os.family || os.name || os.type || '—';
 }
 
 function getOsVersionLabel(device) {
@@ -55,6 +57,14 @@ function getOpenPortsCount(device) {
   if (Number.isFinite(Number(n))) return Number(n);
   if (Array.isArray(device?.services)) return device.services.length;
   return null;
+}
+
+function getCveCount(device) {
+  const n = device?.security?.cve_count;
+  if (Number.isFinite(Number(n))) return Number(n);
+  const list = device?.security?.cves;
+  if (Array.isArray(list)) return list.length;
+  return 0;
 }
 
 function formatPorts(device, max = 4) {
@@ -187,7 +197,18 @@ function DeviceList() {
       label: 'Vendor',
       type: 'string',
       getValue: (d) => d?.vendor || '',
-      render: (device) => device.vendor || '-',
+      render: (device) => (
+        <Typography
+          variant="body2"
+          noWrap
+          title={device.vendor || ''}
+          sx={{
+            maxWidth: { xs: 140, sm: 180, md: 240, lg: 320, xl: 420 },
+          }}
+        >
+          {device.vendor || '-'}
+        </Typography>
+      ),
     },
     {
       id: 'device_type',
@@ -218,7 +239,18 @@ function DeviceList() {
       label: 'OS',
       type: 'string',
       getValue: (d) => getOsLabel(d),
-      render: (device) => getOsLabel(device),
+      render: (device) => (
+        <Typography
+          variant="body2"
+          noWrap
+          title={getOsLabel(device)}
+          sx={{
+            maxWidth: { xs: 140, sm: 180, md: 220, lg: 260, xl: 340 },
+          }}
+        >
+          {getOsLabel(device)}
+        </Typography>
+      ),
     },
     {
       id: 'os_version',
@@ -245,6 +277,21 @@ function DeviceList() {
       align: 'right',
       getValue: (d) => getOpenPortsCount(d),
       render: (device) => (getOpenPortsCount(device) ?? '—'),
+    },
+    {
+      id: 'vulnerabilities',
+      label: 'Vulnerabilities',
+      type: 'number',
+      align: 'center',
+      getValue: (d) => getCveCount(d),
+      render: (device) => {
+        const n = getCveCount(device);
+        return n > 0 ? (
+          <CancelIcon sx={{ color: 'error.main' }} titleAccess={`${n} CVE(s) found`} />
+        ) : (
+          <CheckCircleIcon sx={{ color: 'success.main' }} titleAccess="No CVEs found" />
+        );
+      },
     },
     {
       id: 'status',
@@ -375,7 +422,7 @@ function DeviceList() {
 
       <Paper sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
         <TableContainer sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-          <Table size="small" stickyHeader sx={{ minWidth: 1400 }}>
+          <Table size="small" stickyHeader sx={{ width: '100%', tableLayout: 'auto' }}>
             <TableHead>
               <TableRow>
                 {columns.map((col) => (
@@ -413,7 +460,7 @@ function DeviceList() {
                 .map((device) => (
                   <TableRow key={device._id} hover>
                     {columns.map((col) => (
-                      <TableCell key={col.id} align={col.align || 'left'} sx={{ whiteSpace: 'nowrap' }}>
+                      <TableCell key={col.id} align={col.align || 'left'} sx={{ whiteSpace: 'nowrap', verticalAlign: 'top' }}>
                         {col.render(device)}
                       </TableCell>
                     ))}

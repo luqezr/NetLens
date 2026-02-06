@@ -62,7 +62,12 @@ function AuthedApp() {
   const drawerContent = (
     <>
       <Toolbar />
-      <Box sx={{ overflow: 'auto' }}>
+      <Box
+        sx={{
+          overflowX: 'hidden',
+          overflowY: sidebarCollapsed ? 'hidden' : 'auto',
+        }}
+      >
         <List>
           {menuItems.map((item) => (
             <ListItem key={item.text} disablePadding sx={{ display: 'block' }}>

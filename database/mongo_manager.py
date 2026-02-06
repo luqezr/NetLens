@@ -98,19 +98,42 @@ class MongoDBManager:
         if existing:
             # Update existing device by _id to allow IP changes.
             # If a different doc already occupies the target IP (stale ip-only doc), prefer the MAC identity.
+            prev_ips_to_add = []
             if ip_address and existing.get('ip_address') != ip_address:
+                old_ip = existing.get('ip_address')
+                if old_ip and old_ip not in (None, '', '-', '—') and old_ip != ip_address:
+                    prev_ips_to_add.append(old_ip)
                 conflict = self.devices.find_one({"ip_address": ip_address, "_id": {"$ne": existing["_id"]}})
                 if conflict and not conflict.get('mac_address'):
+                    conflict_ip = conflict.get('ip_address')
+                    if conflict_ip and conflict_ip not in (None, '', '-', '—') and conflict_ip != ip_address:
+                        prev_ips_to_add.append(conflict_ip)
+                    try:
+                        for cip in (conflict.get('previous_ips') or []):
+                            if cip and cip not in (None, '', '-', '—') and cip != ip_address:
+                                prev_ips_to_add.append(cip)
+                    except Exception:
+                        pass
                     try:
                         self.devices.delete_one({"_id": conflict["_id"]})
                     except Exception:
                         pass
 
             try:
-                self.devices.update_one(
-                    {"_id": existing["_id"]},
-                    {"$set": device_data}
-                )
+                update_doc = {"$set": device_data}
+                # Maintain history of previously known IPs when MAC is stable.
+                if prev_ips_to_add:
+                    unique_prev = []
+                    seen = set()
+                    for p in prev_ips_to_add:
+                        if not p or p in seen:
+                            continue
+                        seen.add(p)
+                        unique_prev.append(p)
+                    if unique_prev:
+                        update_doc["$addToSet"] = {"previous_ips": {"$each": unique_prev}}
+
+                self.devices.update_one({"_id": existing["_id"]}, update_doc)
             except DuplicateKeyError:
                 # If IP uniqueness conflicts remain, retry without changing ip_address.
                 safe = dict(device_data)
@@ -118,7 +141,20 @@ class MongoDBManager:
                 # Also avoid forcing a null/empty mac into a unique index.
                 if safe.get('mac_address') in (None, '', '-', '—'):
                     safe.pop('mac_address', None)
-                self.devices.update_one({"_id": existing["_id"]}, {"$set": safe})
+
+                update_doc = {"$set": safe}
+                if prev_ips_to_add:
+                    unique_prev = []
+                    seen = set()
+                    for p in prev_ips_to_add:
+                        if not p or p in seen:
+                            continue
+                        seen.add(p)
+                        unique_prev.append(p)
+                    if unique_prev:
+                        update_doc["$addToSet"] = {"previous_ips": {"$each": unique_prev}}
+
+                self.devices.update_one({"_id": existing["_id"]}, update_doc)
 
             return existing['_id']
 

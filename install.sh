@@ -366,6 +366,30 @@ echo "Installing Python packages into venv..."
 echo "Installing Node.js packages..."
 npm install
 
+# Build frontend (so production UI reflects current frontend/src)
+if [[ -d "/opt/netlens/frontend" ]]; then
+    echo "Building frontend (React)..."
+    # Remove any pre-existing build (repo may contain a stale build/ directory)
+    rm -rf /opt/netlens/frontend/build
+    pushd /opt/netlens/frontend >/dev/null
+    # Prefer a clean install when lockfile is in sync. If it's not, npm ci will hard-fail;
+    # fall back to npm install so we can still produce a working build.
+    if [[ -f package-lock.json ]]; then
+        echo "Installing frontend dependencies (npm ci)..."
+        if ! npm ci --no-audit --no-fund; then
+            echo "npm ci failed (lockfile mismatch). Falling back to npm install..."
+            npm install --no-audit --no-fund
+        fi
+    else
+        echo "Installing frontend dependencies (npm install)..."
+        npm install --no-audit --no-fund
+    fi
+    npm run build
+    popd >/dev/null
+else
+    echo "WARNING: /opt/netlens/frontend not found; skipping frontend build." >&2
+fi
+
 # Create user for service
 echo "Creating service user..."
 if ! id -u netlens > /dev/null 2>&1; then
@@ -414,6 +438,7 @@ APP_DB_PASS="$(generate_urlsafe_password)"
 APP_DB_USER=""
 MONGO_USER_CREATED="no"
 MONGO_ADMIN_CREATED="no"
+MONGO_ADMIN_NOTE=""
 
 echo ""
 echo "MongoDB Configuration:"
@@ -486,45 +511,65 @@ if [[ -n "$MONGO_SHELL" ]]; then
                 exit 1
             fi
         fi
-    else
-        # No auth currently - create admin user first, then app user
-        echo ""
-        echo "Creating MongoDB admin user for future administration..."
-        MONGO_ADMIN_USER="netLensAdmin"
-        MONGO_ADMIN_PASS="$(generate_urlsafe_password)"
-        MONGO_AUTH_DB="admin"
-        
-        create_admin_js=$(cat <<JS
-db = db.getSiblingDB("admin");
-const user = "${MONGO_ADMIN_USER}";
-const pwd = "${MONGO_ADMIN_PASS}";
-try {
-  const existing = db.getUser(user);
-  if (existing) {
-    print('Admin user already exists: ' + user);
-  } else {
-    db.createUser({ 
-      user: user, 
-      pwd: pwd, 
-      roles: [{ role: 'userAdminAnyDatabase', db: 'admin' }, { role: 'dbAdminAnyDatabase', db: 'admin' }] 
-    });
-    print('Created admin user: ' + user);
-  }
-} catch(e) {
-  print('Created admin user: ' + user);
-}
-JS
-)
-        
-        if "$MONGO_SHELL" --quiet --eval "${create_admin_js}" 2>&1 | grep -q "Created admin user"; then
-            echo "✅ Created MongoDB admin: ${MONGO_ADMIN_USER}"
-            MONGO_ADMIN_CREATED="yes"
-            MONGO_AUTH_ENABLED="yes"
         else
-            echo "⚠️  Admin user may already exist or creation skipped"
-            MONGO_AUTH_ENABLED="yes"
+                # Mongo auth disabled.
+                echo ""
+                echo "MongoDB authentication is NOT enabled."
+                echo "For better safety, it is strongly recommended to enable MongoDB authentication." 
+                echo ""
+
+                if prompt_yes_no "Generate a MongoDB admin user now with a random password (recommended)?" "y"; then
+                        MONGO_ADMIN_CREATED="yes"
+                        MONGO_ADMIN_USER="myMongoDBAdmin"
+                        MONGO_ADMIN_PASS="$(generate_urlsafe_password)"
+                        MONGO_AUTH_DB="admin"
+                        MONGO_ADMIN_NOTE="MongoDB auth is currently disabled. To use this admin: enable authorization in /etc/mongod.conf (security.authorization: enabled) and restart mongod/mongodb."
+
+                        echo "Creating MongoDB admin user '${MONGO_ADMIN_USER}' (will be used after you enable auth)..."
+
+                        # Escape any special characters in password for JavaScript
+                        escaped_admin_pwd="${MONGO_ADMIN_PASS//\\/\\\\}"
+                        escaped_admin_pwd="${escaped_admin_pwd//\"/\\\"}"
+
+                        admin_js=$(cat <<EOF
+db = db.getSiblingDB('admin');
+const user = "${MONGO_ADMIN_USER}";
+const pwd = "${escaped_admin_pwd}";
+try {
+    const existing = db.getUser(user);
+    if (existing) {
+        print('ERROR: Admin user already exists: ' + user);
+    } else {
+        db.createUser({
+            user: user,
+            pwd: pwd,
+            roles: [
+                { role: 'userAdminAnyDatabase', db: 'admin' },
+                { role: 'dbAdminAnyDatabase', db: 'admin' }
+            ]
+        });
+        print('Created admin user: ' + user);
+    }
+} catch(e) {
+    print('ERROR: ' + (e && e.message ? e.message : e));
+}
+EOF
+)
+
+                        admin_result=$("$MONGO_SHELL" --quiet --eval "$admin_js" 2>&1 || true)
+                        if echo "$admin_result" | grep -q "ERROR:"; then
+                                echo "WARNING: Could not create admin user automatically. Output:" >&2
+                                echo "$admin_result" >&2
+                                MONGO_ADMIN_CREATED="no"
+                                MONGO_ADMIN_NOTE=""
+                        else
+                                echo "✅ MongoDB admin user created (save credentials from summary.txt)"
+                        fi
+                else
+                        echo "Skipping MongoDB admin user creation."
+                fi
+                MONGO_AUTH_ENABLED="no"
         fi
-    fi
 
     echo "Creating MongoDB application user (auto-generated credentials)..."
     APP_DB_USER=""
@@ -659,11 +704,11 @@ echo ""
 # Update config.env with MongoDB credentials
 echo "Writing /opt/netlens/config.env ..."
 
-# Build appropriate MONGO_URI based on whether we created a user
-if [[ "$MONGO_USER_CREATED" == "yes" ]]; then
+# Build appropriate MONGO_URI based on whether auth is enabled.
+# If auth is disabled, prefer a simple unauthenticated URI even if users exist.
+if [[ "$MONGO_AUTH_ENABLED" == "yes" && "$MONGO_USER_CREATED" == "yes" ]]; then
     MONGO_URI_VALUE="mongodb://${APP_DB_USER}:${APP_DB_PASS}@localhost:${MONGO_PORT}/${APP_DB}?authSource=${APP_DB}"
 else
-    # No auth or manual setup
     MONGO_URI_VALUE="mongodb://localhost:${MONGO_PORT}/${APP_DB}"
 fi
 
@@ -777,6 +822,7 @@ MongoDB Admin (CREATED by installer):
 - Auth database: ${MONGO_AUTH_DB}
 - Roles: userAdminAnyDatabase, dbAdminAnyDatabase
 - Login: mongosh --username ${MONGO_ADMIN_USER} --password '${MONGO_ADMIN_PASS}' --authenticationDatabase ${MONGO_AUTH_DB}
+ - Note: ${MONGO_ADMIN_NOTE}
 "
 fi
 
@@ -817,6 +863,8 @@ NetLens Web Admin:
 - Password: ${DEFAULT_ADMIN_PASSWORD}
 
 ${MONGO_SUMMARY}
+
+${MONGO_ADMIN_SUMMARY}
 
 ================================================================================
 INSTALLATION DETAILS

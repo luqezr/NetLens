@@ -29,6 +29,23 @@ const edgeColors = {
   lan: '#64748b',
 };
 
+function normalizeTypeKey(raw) {
+  const s = String(raw || '').trim().toLowerCase();
+  if (!s) return 'unknown';
+  if (s === 'router' || s.includes('gateway')) return 'router';
+  if (s === 'switch') return 'switch';
+  if (s.includes('printer')) return 'printer';
+  if (s.includes('server') || s.includes('nas')) return 'server';
+  if (s.includes('windows')) return 'windows_pc';
+  if (s.includes('linux') || s.includes('ubuntu') || s.includes('debian') || s.includes('fedora')) return 'linux_pc';
+  if (s === 'mac' || s.includes('macos') || s.includes('os x') || s.includes('apple')) return 'mac';
+  if (s.includes('phone') || s.includes('mobile') || s.includes('android') || s.includes('iphone') || s.includes('ipad') || s.includes('tablet')) return 'mobile';
+
+  // Common formatting variants -> snake-ish key
+  const key = s.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return key || 'unknown';
+}
+
 function isValidIpv4(ip) {
   if (!ip || typeof ip !== 'string') return false;
   if (ip.includes('/')) return false;
@@ -204,44 +221,47 @@ function NetworkTopology() {
       const positions = computeHierarchyPositions(nodeData, edgeData);
 
       // Transform nodes for React Flow
-      const flowNodes = nodeData.map((node) => ({
-        id: node.id,
-        type: 'default',
-        data: {
-          ip: node.ip,
-          type: node.type,
-          label: (
-            <Box sx={{ textAlign: 'center', p: 1, cursor: isValidIpv4(node.ip) ? 'pointer' : 'default' }}>
-              <Typography variant="caption" fontWeight="bold" sx={{ textDecoration: isValidIpv4(node.ip) ? 'underline' : 'none' }}>
-                {node.label}
-              </Typography>
-              <br />
-              <Typography variant="caption" color="text.secondary">
-                {node.ip}
-              </Typography>
-              <br />
-              <Chip
-                label={node.type}
-                size="small"
-                sx={{
-                  mt: 0.5,
-                  fontSize: '0.65rem',
-                  height: '18px',
-                }}
-              />
-            </Box>
-          ),
-        },
-        position: positions[node.id] || { x: 0, y: 0 },
-        style: {
-          background: nodeColors[node.type] || nodeColors.unknown,
-          color: 'white',
-          border: '2px solid #fff',
-          borderRadius: 8,
-          padding: 10,
-          width: 200,
-        },
-      }));
+      const flowNodes = nodeData.map((node) => {
+        const typeKey = normalizeTypeKey(node.type);
+        return {
+          id: node.id,
+          type: 'default',
+          data: {
+            ip: node.ip,
+            type: node.type,
+            label: (
+              <Box sx={{ textAlign: 'center', p: 1, cursor: isValidIpv4(node.ip) ? 'pointer' : 'default' }}>
+                <Typography variant="caption" fontWeight="bold" sx={{ textDecoration: isValidIpv4(node.ip) ? 'underline' : 'none' }}>
+                  {node.label}
+                </Typography>
+                <br />
+                <Typography variant="caption" color="text.secondary">
+                  {node.ip}
+                </Typography>
+                <br />
+                <Chip
+                  label={node.type}
+                  size="small"
+                  sx={{
+                    mt: 0.5,
+                    fontSize: '0.65rem',
+                    height: '18px',
+                  }}
+                />
+              </Box>
+            ),
+          },
+          position: positions[node.id] || { x: 0, y: 0 },
+          style: {
+            background: nodeColors[typeKey] || nodeColors.unknown,
+            color: 'white',
+            border: '2px solid #fff',
+            borderRadius: 8,
+            padding: 10,
+            width: 200,
+          },
+        };
+      });
 
       // Transform edges for React Flow
       const flowEdges = edgeData.map((edge, index) => ({

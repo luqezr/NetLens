@@ -56,7 +56,7 @@ let state = {
   log_cursor: 0,
   log_buffer: [],
   next_scheduled_at: null,
-  schedule: { enabled: false, interval_minutes: 60 },
+  schedule: { enabled: false, interval_minutes: 60, mode: 'interval', exact_at: null, daily_at: null, weekly_at: null, weekly_days: [] },
 };
 
 let currentChild = null;
@@ -83,6 +83,63 @@ function pushLog({ stream, text }) {
 
 let scheduleTimer = null;
 let scheduleRefreshTimer = null;
+let scheduleExactTimeout = null;
+let scheduleRecurTimeout = null;
+
+const MAX_TIMEOUT_MS = 2147483647; // Node.js setTimeout max (~24.8 days)
+
+function parseTimeOfDay(raw) {
+  const s = String(raw || '').trim();
+
+  // 24-hour HH:MM
+  let m = s.match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+  if (m) return { hour: Number(m[1]), minute: Number(m[2]) };
+
+  // 12-hour h:MM AM/PM
+  m = s.match(/^(\d{1,2}):(\d{2})\s*([AaPp][Mm])$/);
+  if (!m) return null;
+  let hour = Number(m[1]);
+  const minute = Number(m[2]);
+  const ampm = String(m[3]).toLowerCase();
+  if (!Number.isFinite(hour) || hour < 1 || hour > 12) return null;
+  if (!Number.isFinite(minute) || minute < 0 || minute > 59) return null;
+  if (ampm === 'pm' && hour !== 12) hour += 12;
+  if (ampm === 'am' && hour === 12) hour = 0;
+  return { hour, minute };
+}
+
+function computeNextDaily(now, timeStr) {
+  const tm = parseTimeOfDay(timeStr);
+  if (!tm) return null;
+  const d = new Date(now);
+  d.setSeconds(0, 0);
+  d.setHours(tm.hour, tm.minute, 0, 0);
+  if (d.getTime() <= now.getTime()) d.setDate(d.getDate() + 1);
+  return d;
+}
+
+function computeNextWeekly(now, daysOfWeek, timeStr) {
+  const tm = parseTimeOfDay(timeStr);
+  if (!tm) return null;
+  const days = Array.isArray(daysOfWeek) ? daysOfWeek.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n >= 0 && n <= 6) : [];
+  const set = new Set(days);
+  if (set.size === 0) return null;
+
+  // Search up to 8 days ahead to find the next matching weekday at the desired time.
+  for (let offset = 0; offset <= 8; offset += 1) {
+    const d = new Date(now);
+    d.setDate(d.getDate() + offset);
+    d.setSeconds(0, 0);
+    d.setHours(tm.hour, tm.minute, 0, 0);
+
+    const dow = d.getDay();
+    if (!set.has(dow)) continue;
+    if (d.getTime() <= now.getTime()) continue;
+    return d;
+  }
+
+  return null;
+}
 
 function getStaleMinutes() {
   const raw = process.env.SCAN_STALE_MINUTES;
@@ -115,8 +172,12 @@ async function getScheduleSettings(db) {
   return {
     enabled: Boolean(doc.enabled),
     interval_minutes: Number(doc.interval_minutes) || 60,
-  mode: doc.mode === 'exact' ? 'exact' : 'interval',
-  exact_at: doc.exact_at || null,
+    mode: ['interval', 'exact', 'daily', 'weekly'].includes(doc.mode) ? doc.mode : (doc.mode === 'exact' ? 'exact' : 'interval'),
+    exact_at: doc.exact_at || null,
+    daily_at: doc.daily_at || null,
+    weekly_at: doc.weekly_at || null,
+    weekly_days: Array.isArray(doc.weekly_days) ? doc.weekly_days : [],
+    network_ranges: (doc.network_ranges ? String(doc.network_ranges) : null),
   };
 }
 
@@ -177,14 +238,23 @@ function runPythonOnce({ reason, scan_request_id, network_ranges, options }) {
     }
 
     // Avoid noisy PermissionError when running the API as a normal user (dev).
-    // The service user (netscanner) typically has write access to /opt/netlens/logs.
-    if (!env.LOG_FILE) {
-      const optLogDir = '/opt/netlens/logs';
-      if (canWriteDir(optLogDir)) {
+    // If LOG_FILE is explicitly set (e.g. via config.env) but isn't writable by this user,
+    // override it to a writable temp location so scans don't log scary stack traces.
+    const optLogDir = '/opt/netlens/logs';
+    const tmpLog = path.join(os.tmpdir(), 'netlens-scanner.log');
+    try {
+      if (env.LOG_FILE) {
+        const dir = path.dirname(String(env.LOG_FILE));
+        if (!canWriteDir(dir)) {
+          env.LOG_FILE = tmpLog;
+        }
+      } else if (canWriteDir(optLogDir)) {
         env.LOG_FILE = path.join(optLogDir, 'scanner.log');
       } else {
-        env.LOG_FILE = path.join(os.tmpdir(), 'netlens-scanner.log');
+        env.LOG_FILE = tmpLog;
       }
+    } catch {
+      env.LOG_FILE = tmpLog;
     }
 
     const child = spawn(python, [script, '--run-once'], {
@@ -227,6 +297,14 @@ function runPythonOnce({ reason, scan_request_id, network_ranges, options }) {
 }
 
 async function processQueue(db) {
+  // If a privileged external scanner is alive (scanner_service.py as root),
+  // do not claim/execute requests in this Node process.
+  try {
+    if (await isExternalScannerAlive(db)) return;
+  } catch {
+    // ignore and fall back to local processing
+  }
+
   if (state.running) return;
 
   // Try to claim a request
@@ -324,14 +402,135 @@ async function refreshSchedule(db) {
   const next = await getScheduleSettings(db);
   state.schedule = next;
 
+  // If we had a computed next run time and it is overdue, enqueue it once.
+  // This makes schedules robust even if long timers don't survive restarts.
+  try {
+    if (next.enabled && state.next_scheduled_at && state._schedule_due_fingerprint) {
+      const dueAtMs = new Date(state.next_scheduled_at).getTime();
+      const nowMs = Date.now();
+      const isDue = Number.isFinite(dueAtMs) && nowMs >= dueAtMs;
+      if (isDue && state._schedule_last_fired_fingerprint !== state._schedule_due_fingerprint) {
+        const fp = state._schedule_due_fingerprint;
+        state._schedule_last_fired_fingerprint = fp;
+        await enqueueScan(db, { type: 'scheduled', requested_by: 'server', network_ranges: next.network_ranges || null });
+        console.log(`🗓️ Scheduled scan enqueued (catch-up, due=${new Date(dueAtMs).toISOString()})`);
+        try {
+          await processQueue(db);
+        } catch {
+          // ignore
+        }
+
+        // One-shot exact schedule: auto-disable after it fires.
+        if (next.mode === 'exact') {
+          await db.collection('settings').updateOne(
+            { _id: 'scan_schedule' },
+            { $set: { enabled: false, updated_at: new Date() } },
+            { upsert: true }
+          );
+          state.next_scheduled_at = null;
+          state._schedule_due_fingerprint = null;
+        } else {
+          // Force recomputation of the next run time.
+          state.next_scheduled_at = null;
+          state._schedule_due_fingerprint = null;
+        }
+      }
+    }
+  } catch {
+    // ignore; normal refresh below will still set timers
+  }
+
   // If schedule is disabled, always clear the timer.
   if (!next.enabled) {
     if (scheduleTimer) {
       clearInterval(scheduleTimer);
       scheduleTimer = null;
     }
+    if (scheduleExactTimeout) {
+      clearTimeout(scheduleExactTimeout);
+      scheduleExactTimeout = null;
+    }
+    if (scheduleRecurTimeout) {
+      clearTimeout(scheduleRecurTimeout);
+      scheduleRecurTimeout = null;
+    }
     state.next_scheduled_at = null;
     state._schedule_interval_ms = null;
+    state._schedule_exact_fingerprint = null;
+    state._schedule_recur_fingerprint = null;
+    state._schedule_due_fingerprint = null;
+    return;
+  }
+
+  // Daily/weekly recurring schedules (calendar-based).
+  if (next.mode === 'daily' || next.mode === 'weekly') {
+    // Clear any interval timer.
+    if (scheduleTimer) {
+      clearInterval(scheduleTimer);
+      scheduleTimer = null;
+    }
+    // Clear any one-shot exact timer.
+    if (scheduleExactTimeout) {
+      clearTimeout(scheduleExactTimeout);
+      scheduleExactTimeout = null;
+    }
+
+    const now = new Date();
+    const target = next.mode === 'daily'
+      ? computeNextDaily(now, next.daily_at)
+      : computeNextWeekly(now, next.weekly_days, next.weekly_at);
+
+    if (!target || Number.isNaN(target.getTime())) {
+      state.next_scheduled_at = null;
+      return;
+    }
+
+    state.next_scheduled_at = target;
+    const fingerprint = `${next.mode}:${target.getTime()}`;
+    state._schedule_due_fingerprint = fingerprint;
+    if (state._schedule_recur_fingerprint === fingerprint && scheduleRecurTimeout) {
+      return;
+    }
+    state._schedule_recur_fingerprint = fingerprint;
+
+    if (scheduleRecurTimeout) {
+      clearTimeout(scheduleRecurTimeout);
+      scheduleRecurTimeout = null;
+    }
+
+    const ms = Math.max(0, target.getTime() - Date.now());
+    const armFire = (delayMs) => setTimeout(async () => {
+      try {
+        // Mark as fired before enqueue to avoid double fire in edge cases.
+        state._schedule_last_fired_fingerprint = fingerprint;
+        await enqueueScan(db, { type: 'scheduled', requested_by: 'server', network_ranges: next.network_ranges || null });
+        console.log(`🗓️ Scheduled scan enqueued (${next.mode} at ${target.toISOString()})`);
+        await processQueue(db);
+      } catch {
+        // ignore
+      } finally {
+        // Recompute next run immediately (don’t wait for the next 60s refresh tick).
+        try {
+          await refreshSchedule(db);
+        } catch {
+          // ignore
+        }
+      }
+    }, delayMs);
+
+    // Avoid exceeding Node's maximum setTimeout delay.
+    if (ms > MAX_TIMEOUT_MS) {
+      scheduleRecurTimeout = setTimeout(async () => {
+        try {
+          await refreshSchedule(db);
+        } catch {
+          // ignore
+        }
+      }, MAX_TIMEOUT_MS);
+    } else {
+      scheduleRecurTimeout = armFire(ms);
+    }
+
     return;
   }
 
@@ -349,24 +548,32 @@ async function refreshSchedule(db) {
       scheduleTimer = null;
     }
 
+    // Clear any recurring calendar timer.
+    if (scheduleRecurTimeout) {
+      clearTimeout(scheduleRecurTimeout);
+      scheduleRecurTimeout = null;
+    }
+
     const ms = Math.max(0, target.getTime() - Date.now());
     state.next_scheduled_at = target;
 
     // Recreate one-shot timer only if timestamp changed.
     const fingerprint = String(target.getTime());
-    if (state._schedule_exact_fingerprint === fingerprint && state._schedule_exact_timeout) {
+    state._schedule_due_fingerprint = `exact:${fingerprint}`;
+    if (state._schedule_exact_fingerprint === fingerprint && scheduleExactTimeout) {
       return;
     }
     state._schedule_exact_fingerprint = fingerprint;
 
-    if (state._schedule_exact_timeout) {
-      clearTimeout(state._schedule_exact_timeout);
-      state._schedule_exact_timeout = null;
+    if (scheduleExactTimeout) {
+      clearTimeout(scheduleExactTimeout);
+      scheduleExactTimeout = null;
     }
 
-    state._schedule_exact_timeout = setTimeout(async () => {
+    const armFire = (delayMs) => setTimeout(async () => {
       try {
-        await enqueueScan(db, { type: 'scheduled', requested_by: 'server' });
+        state._schedule_last_fired_fingerprint = `exact:${fingerprint}`;
+        await enqueueScan(db, { type: 'scheduled', requested_by: 'server', network_ranges: next.network_ranges || null });
         console.log(`🗓️ Scheduled scan enqueued (at ${target.toISOString()})`);
         await processQueue(db);
 
@@ -380,7 +587,19 @@ async function refreshSchedule(db) {
       } catch {
         // ignore
       }
-    }, ms);
+    }, delayMs);
+
+    if (ms > MAX_TIMEOUT_MS) {
+      scheduleExactTimeout = setTimeout(async () => {
+        try {
+          await refreshSchedule(db);
+        } catch {
+          // ignore
+        }
+      }, MAX_TIMEOUT_MS);
+    } else {
+      scheduleExactTimeout = armFire(ms);
+    }
 
     return;
   }
@@ -396,6 +615,8 @@ async function refreshSchedule(db) {
     state.next_scheduled_at = new Date(Date.now() + intervalMs);
   }
 
+  state._schedule_due_fingerprint = `interval:${new Date(state.next_scheduled_at).getTime()}`;
+
   if (!needsNewTimer) return;
 
   if (scheduleTimer) {
@@ -405,14 +626,23 @@ async function refreshSchedule(db) {
 
   scheduleTimer = setInterval(async () => {
     try {
-      await enqueueScan(db, { type: 'scheduled', requested_by: 'server' });
+      const fp = state._schedule_due_fingerprint;
+      if (fp) state._schedule_last_fired_fingerprint = fp;
+      await enqueueScan(db, { type: 'scheduled', requested_by: 'server', network_ranges: next.network_ranges || null });
       console.log(`⏱️ Scheduled scan enqueued (every ${intervalMinutes} min)`);
       await processQueue(db);
       state.next_scheduled_at = new Date(Date.now() + intervalMs);
+      state._schedule_due_fingerprint = `interval:${state.next_scheduled_at.getTime()}`;
     } catch {
       // ignore
     }
   }, intervalMs);
+}
+
+async function refreshScheduleNow({ getDb }) {
+  const db = getDb();
+  await refreshSchedule(db);
+  return { next_scheduled_at: state.next_scheduled_at, schedule: state.schedule };
 }
 
 function init({ getDb }) {
@@ -518,6 +748,98 @@ function getLiveLog({ since, limit } = {}) {
   };
 }
 
+// Optional external-scanner support (DB-backed logs).
+// This repo currently runs scans by spawning scanner_service.py and capturing stdout/stderr,
+// so DB logs are best-effort and should never break the /api/scans/log endpoint.
+async function isExternalScannerAlive(_db) {
+  // Allow forcing local execution (useful for dev).
+  const forceLocal = String(process.env.SCAN_FORCE_LOCAL_WORKER || '').trim().toLowerCase();
+  if (forceLocal && !['0', 'false', 'no', 'off'].includes(forceLocal)) return false;
+
+  try {
+    const doc = await _db.collection('scanner_heartbeat').findOne({ _id: 'scanner' });
+    if (!doc) return false;
+    const ts = doc.ts ? new Date(doc.ts) : null;
+    if (!ts || Number.isNaN(ts.getTime())) return false;
+
+    // Only consider an external scanner “alive” if it's privileged (root) so OS/MAC detection works.
+    if (doc.is_root === false) return false;
+
+    const ageMs = Date.now() - ts.getTime();
+    return ageMs >= 0 && ageMs < 45_000;
+  } catch {
+    return false;
+  }
+}
+
+async function getLiveLogFromDb({ getDb, since, limit } = {}) {
+  const sinceId = since ? Number(since) : 0;
+  const nextSince = Number.isFinite(sinceId) && sinceId >= 0 ? sinceId : 0;
+  const max = Number.isFinite(Number(limit)) ? Math.max(1, Math.min(2000, Number(limit))) : 400;
+
+  if (typeof getDb !== 'function') {
+    return {
+      items: [],
+      next_since: nextSince,
+      running: false,
+      current_request_id: null,
+      current_child_pid: null,
+      limit: max,
+      timestamp: new Date(),
+    };
+  }
+
+  const db = getDb();
+
+  // Track the most recent running request (external scanner updates scan_requests).
+  const runningReq = await db
+    .collection('scan_requests')
+    .find({ status: 'running' })
+    .sort({ started_at: -1 })
+    .limit(1)
+    .toArray();
+
+  const req = runningReq[0] || null;
+  const requestId = req?._id || null;
+  if (!requestId) {
+    return {
+      items: [],
+      next_since: nextSince,
+      running: false,
+      current_request_id: null,
+      current_child_pid: null,
+      limit: max,
+      timestamp: new Date(),
+    };
+  }
+
+  const docs = await db
+    .collection('scan_logs')
+    .find({ request_id: requestId, seq: { $gt: nextSince } })
+    .sort({ seq: 1 })
+    .limit(max)
+    .toArray();
+
+  const items = (docs || []).map((d) => ({
+    id: Number(d.seq) || 0,
+    ts: d.ts || new Date(),
+    stream: d.stream || 'info',
+    text: d.text || '',
+    request_id: requestId.toString(),
+  }));
+
+  const advanced = items.length > 0 ? items[items.length - 1].id : nextSince;
+  return {
+    items,
+    next_since: advanced,
+    running: true,
+    current_request_id: requestId.toString(),
+    current_child_pid: null,
+    limit: max,
+    timestamp: new Date(),
+  };
+}
+
 function suggestNetworkRanges() {
   const nets = os.networkInterfaces();
   const results = [];
@@ -578,8 +900,11 @@ async function getStatus({ getDb }) {
     );
   }
 
+  // Important: do not leak Node timer handles into JSON responses.
+  const { _schedule_exact_timeout, _schedule_recur_timeout, ...safeState } = state;
+
   return {
-    ...state,
+    ...safeState,
     latest_scan: latestHistory[0] || null,
     current_request,
     // Back-compat naming for UI/API clients
@@ -595,8 +920,11 @@ module.exports = {
   init,
   requestManualScan,
   requestManualScanWithOptions,
+  refreshScheduleNow,
   getStatus,
   forceStopAll,
   getLiveLog,
+  getLiveLogFromDb,
+  isExternalScannerAlive,
   suggestNetworkRanges,
 };

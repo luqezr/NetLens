@@ -1,28 +1,104 @@
-import React, { useState, useEffect } from 'react';
-import { Grid, Paper, Typography, Box, Card, CardContent, Button, TextField, Switch, FormControlLabel, Alert, Snackbar, LinearProgress } from '@mui/material';
+import React, { useRef, useState, useEffect } from 'react';
+import { Grid, Paper, Typography, Box, Card, CardContent, Button, TextField, Switch, FormControlLabel, Alert, Snackbar, LinearProgress, IconButton } from '@mui/material';
+import CalendarMonthIcon from '@mui/icons-material/CalendarMonth';
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import DevicesIcon from '@mui/icons-material/Devices';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import CancelIcon from '@mui/icons-material/Cancel';
 import WarningIcon from '@mui/icons-material/Warning';
-import { getStats, runScanNow, getScanSchedule, setScanSchedule, getScanStatus } from '../services/api';
+import { getStats, runScanNow, getScanSchedule, setScanSchedule, getScanStatus, getSuggestedNetworkRanges } from '../services/api';
 import RunScanDialog from './RunScanDialog';
+import ExactDateTimeDialog from './ExactDateTimeDialog';
 
 const COLORS = ['#7c3aed', '#22c55e', '#a855f7', '#10b981', '#c084fc'];
+
+function normalizeTimeTo24h(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+
+  // 24h HH:MM
+  let m = s.match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+  if (m) {
+    const hour = Number(m[1]);
+    const minute = Number(m[2]);
+    return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  }
+
+  // 12h h:MM AM/PM
+  m = s.match(/^(\d{1,2}):(\d{2})\s*([AaPp][Mm])$/);
+  if (m) {
+    let hour = Number(m[1]);
+    const minute = Number(m[2]);
+    const ampm = String(m[3]).toLowerCase();
+    if (!Number.isFinite(hour) || hour < 1 || hour > 12) return null;
+    if (!Number.isFinite(minute) || minute < 0 || minute > 59) return null;
+    if (ampm === 'pm' && hour !== 12) hour += 12;
+    if (ampm === 'am' && hour === 12) hour = 0;
+    return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  }
+
+  return null;
+}
 
 function Dashboard() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [scanSchedule, setScanScheduleState] = useState({ enabled: true, interval_minutes: 60 });
+  const [scanSchedule, setScanScheduleState] = useState({ enabled: true, interval_minutes: 60, network_ranges: '' });
   const [scheduleMode, setScheduleMode] = useState('interval');
   const [scheduleDate, setScheduleDate] = useState('');
   const [scheduleTime, setScheduleTime] = useState('');
+  const [exactPickerOpen, setExactPickerOpen] = useState(false);
+  const [dailyAt, setDailyAt] = useState('03:30');
+  const [weeklyAt, setWeeklyAt] = useState('03:30');
+  const [weeklyDays, setWeeklyDays] = useState([1, 2, 3, 4, 5]);
   const [scanStatus, setScanStatus] = useState(null);
   const [scanActionLoading, setScanActionLoading] = useState(false);
   const [scanScheduleSaving, setScanScheduleSaving] = useState(false);
   const [scanMessage, setScanMessage] = useState(null);
   const [scanToastDismissed, setScanToastDismissed] = useState(false);
   const [runDialogOpen, setRunDialogOpen] = useState(false);
+
+  const scheduleDirtyRef = useRef(false);
+  const [scheduleDirty, setScheduleDirty] = useState(false);
+
+  const markScheduleDirty = () => {
+    scheduleDirtyRef.current = true;
+    setScheduleDirty(true);
+  };
+
+  const clearScheduleDirty = () => {
+    scheduleDirtyRef.current = false;
+    setScheduleDirty(false);
+  };
+
+  const scheduleFieldSx = (enabled, active) => {
+    const main = enabled ? (active ? 'success.main' : undefined) : 'primary.main';
+    const label = enabled ? (active ? 'success.main' : undefined) : 'primary.main';
+    if (!main && !label) return undefined;
+    return {
+      '& .MuiInputLabel-root': { color: label },
+      '& .MuiOutlinedInput-notchedOutline': { borderColor: main },
+      '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: main },
+      '&.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: main },
+    };
+  };
+
+  const suggestScheduleRangesIfEmpty = async () => {
+    try {
+      const current = String(scanSchedule?.network_ranges || '').trim();
+      if (current) return;
+      const res = await getSuggestedNetworkRanges();
+      const ranges = res?.data?.data?.ranges || res?.data?.data || res?.data?.ranges || [];
+      const first = Array.isArray(ranges) ? ranges[0] : null;
+      if (first) {
+        markScheduleDirty();
+        setScanScheduleState((s) => ({ ...s, network_ranges: String(first) }));
+        setScanMessage({ severity: 'info', text: `Schedule network range set to ${first}. Edit if needed.` });
+      }
+    } catch {
+      // best-effort
+    }
+  };
 
   useEffect(() => {
     fetchStats();
@@ -64,20 +140,35 @@ function Dashboard() {
     try {
       const [scheduleRes, statusRes] = await Promise.all([getScanSchedule(), getScanStatus()]);
       const sched = scheduleRes.data.data;
-      setScanScheduleState(sched);
 
-      const mode = sched?.mode === 'exact' ? 'exact' : 'interval';
-      setScheduleMode(mode);
-      if (mode === 'exact' && sched?.exact_at) {
-        const d = new Date(sched.exact_at);
-        if (!Number.isNaN(d.getTime())) {
-          const yyyy = d.getFullYear();
-          const mm = String(d.getMonth() + 1).padStart(2, '0');
-          const dd = String(d.getDate()).padStart(2, '0');
-          const hh = String(d.getHours()).padStart(2, '0');
-          const mi = String(d.getMinutes()).padStart(2, '0');
-          setScheduleDate(`${yyyy}-${mm}-${dd}`);
-          setScheduleTime(`${hh}:${mi}`);
+      // Don't clobber unsaved edits during polling.
+      if (!scheduleDirtyRef.current) {
+        setScanScheduleState({ ...sched, network_ranges: sched?.network_ranges || '' });
+
+        const mode = ['interval', 'exact', 'daily', 'weekly'].includes(sched?.mode)
+          ? sched.mode
+          : (sched?.mode === 'exact' ? 'exact' : 'interval');
+        setScheduleMode(mode);
+        if (mode === 'exact' && sched?.exact_at) {
+          const d = new Date(sched.exact_at);
+          if (!Number.isNaN(d.getTime())) {
+            const yyyy = d.getFullYear();
+            const mm = String(d.getMonth() + 1).padStart(2, '0');
+            const dd = String(d.getDate()).padStart(2, '0');
+            const hh = String(d.getHours()).padStart(2, '0');
+            const mi = String(d.getMinutes()).padStart(2, '0');
+            setScheduleDate(`${yyyy}-${mm}-${dd}`);
+            setScheduleTime(`${hh}:${mi}`);
+          }
+        }
+        if (mode === 'daily' && sched?.daily_at) {
+          setDailyAt(normalizeTimeTo24h(sched.daily_at) || String(sched.daily_at));
+        }
+        if (mode === 'weekly') {
+          if (sched?.weekly_at) setWeeklyAt(normalizeTimeTo24h(sched.weekly_at) || String(sched.weekly_at));
+          if (Array.isArray(sched?.weekly_days) && sched.weekly_days.length > 0) {
+            setWeeklyDays(sched.weekly_days.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n >= 0 && n <= 6));
+          }
         }
       }
       setScanStatus(statusRes.data.data);
@@ -133,14 +224,42 @@ function Dashboard() {
         interval_minutes: Number(scanSchedule.interval_minutes) || 60,
         mode: scheduleMode,
         exact_at: exactAt,
+        daily_at: scheduleMode === 'daily' ? (normalizeTimeTo24h(dailyAt) || dailyAt) : null,
+        weekly_at: scheduleMode === 'weekly' ? (normalizeTimeTo24h(weeklyAt) || weeklyAt) : null,
+        weekly_days: scheduleMode === 'weekly' ? weeklyDays : null,
+        network_ranges: String(scanSchedule?.network_ranges || '').trim() || null,
       });
       setScanMessage({ severity: 'success', text: 'Schedule updated.' });
+
+      clearScheduleDirty();
       await fetchScanControls();
     } catch (error) {
+      // Restore dirty state if save failed so polling doesn't clobber the form.
+      markScheduleDirty();
       setScanMessage({ severity: 'error', text: error?.response?.data?.error || error.message || 'Failed to update schedule' });
     } finally {
       setScanScheduleSaving(false);
     }
+  };
+
+  const DAYS = [
+    { id: 0, label: 'Sun' },
+    { id: 1, label: 'Mon' },
+    { id: 2, label: 'Tue' },
+    { id: 3, label: 'Wed' },
+    { id: 4, label: 'Thu' },
+    { id: 5, label: 'Fri' },
+    { id: 6, label: 'Sat' },
+  ];
+
+  const toggleWeeklyDay = (id) => {
+    setWeeklyDays((prev) => {
+      markScheduleDirty();
+      const set = new Set(prev);
+      if (set.has(id)) set.delete(id);
+      else set.add(id);
+      return Array.from(set).sort((a, b) => a - b);
+    });
   };
 
   if (loading) {
@@ -191,6 +310,7 @@ function Dashboard() {
                   Last scan: {scanStatus?.latest_scan?.started_at ? new Date(scanStatus.latest_scan.started_at).toLocaleString() : '—'}
                   {' • '}Queued: {scanStatus?.pending_requests ?? scanStatus?.queued_requests ?? '—'}
                   {' • '}Running: {scanStatus?.running_requests ?? '—'}
+                  {scheduleDirty ? ' • Editing schedule' : ''}
                 </Typography>
               </Box>
 
@@ -203,7 +323,18 @@ function Dashboard() {
                   control={
                     <Switch
                       checked={Boolean(scanSchedule.enabled)}
-                      onChange={(e) => setScanScheduleState((s) => ({ ...s, enabled: e.target.checked }))}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        markScheduleDirty();
+                        setScanScheduleState((s) => ({ ...s, enabled: checked }));
+                        if (checked) suggestScheduleRangesIfEmpty();
+                      }}
+                      sx={{
+                        '& .MuiSwitch-switchBase': { color: 'primary.main' },
+                        '& .MuiSwitch-switchBase + .MuiSwitch-track': { backgroundColor: 'primary.main', opacity: 0.35 },
+                        '& .MuiSwitch-switchBase.Mui-checked': { color: 'success.main' },
+                        '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { backgroundColor: 'success.main', opacity: 0.45 },
+                      }}
                     />
                   }
                   label="Enable schedule"
@@ -215,43 +346,85 @@ function Dashboard() {
                   select
                   SelectProps={{ native: true }}
                   value={scheduleMode}
-                  onChange={(e) => setScheduleMode(e.target.value)}
-                  sx={{ width: 150 }}
+                  onChange={(e) => {
+                    markScheduleDirty();
+                    setScheduleMode(e.target.value);
+                  }}
+                  sx={{ width: 150, ...(scheduleFieldSx(Boolean(scanSchedule.enabled), true) || {}) }}
                 >
                   <option value="interval">Interval</option>
                   <option value="exact">Exact date/time</option>
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
                 </TextField>
+
+                <TextField
+                  label="Network range(s)"
+                  size="small"
+                  value={scanSchedule.network_ranges || ''}
+                  onChange={(e) => {
+                    markScheduleDirty();
+                    setScanScheduleState((s) => ({ ...s, network_ranges: e.target.value }));
+                  }}
+                  placeholder="e.g. 192.168.50.0/24"
+                  sx={{ minWidth: 260, ...(scheduleFieldSx(Boolean(scanSchedule.enabled), true) || {}) }}
+                />
 
                 <TextField
                   label="Interval (minutes)"
                   type="number"
                   size="small"
                   value={scanSchedule.interval_minutes ?? 60}
-                  onChange={(e) => setScanScheduleState((s) => ({ ...s, interval_minutes: e.target.value }))}
+                  onChange={(e) => {
+                    markScheduleDirty();
+                    setScanScheduleState((s) => ({ ...s, interval_minutes: e.target.value }));
+                  }}
                   inputProps={{ min: 1, max: 1440 }}
-                  sx={{ width: 170 }}
+                  sx={{ width: 170, ...(scheduleFieldSx(Boolean(scanSchedule.enabled), scheduleMode === 'interval') || {}) }}
                   disabled={scheduleMode !== 'interval'}
                 />
 
+                {scheduleMode === 'exact' && (
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <Typography variant="body2" color="text.secondary" sx={{ whiteSpace: 'nowrap' }}>
+                      {scheduleDate && scheduleTime ? `${scheduleDate} ${scheduleTime}` : 'Select date/time'}
+                    </Typography>
+                    <IconButton
+                      size="small"
+                      onClick={() => { markScheduleDirty(); setExactPickerOpen(true); }}
+                      aria-label="Pick exact date and time"
+                      sx={{ color: Boolean(scanSchedule.enabled) ? 'success.main' : 'primary.main' }}
+                    >
+                      <CalendarMonthIcon />
+                    </IconButton>
+                  </Box>
+                )}
+
                 <TextField
-                  label="Date"
-                  type="date"
+                  label="Daily at"
+                  type="time"
                   size="small"
-                  value={scheduleDate}
-                  onChange={(e) => setScheduleDate(e.target.value)}
-                  sx={{ width: 160 }}
-                  disabled={scheduleMode !== 'exact'}
+                  value={dailyAt}
+                  onChange={(e) => {
+                    markScheduleDirty();
+                    setDailyAt(e.target.value);
+                  }}
+                  sx={{ width: 130, ...(scheduleFieldSx(Boolean(scanSchedule.enabled), scheduleMode === 'daily') || {}) }}
+                  disabled={scheduleMode !== 'daily'}
                   InputLabelProps={{ shrink: true }}
                 />
 
                 <TextField
-                  label="Time"
+                  label="Weekly at"
                   type="time"
                   size="small"
-                  value={scheduleTime}
-                  onChange={(e) => setScheduleTime(e.target.value)}
-                  sx={{ width: 130 }}
-                  disabled={scheduleMode !== 'exact'}
+                  value={weeklyAt}
+                  onChange={(e) => {
+                    markScheduleDirty();
+                    setWeeklyAt(e.target.value);
+                  }}
+                  sx={{ width: 130, ...(scheduleFieldSx(Boolean(scanSchedule.enabled), scheduleMode === 'weekly') || {}) }}
+                  disabled={scheduleMode !== 'weekly'}
                   InputLabelProps={{ shrink: true }}
                 />
 
@@ -259,6 +432,27 @@ function Dashboard() {
                   Save Schedule
                 </Button>
               </Box>
+
+              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.75, display: 'block' }}>
+                Network range(s): comma-separated CIDRs/IP ranges used for scheduled scans.
+              </Typography>
+
+              {scheduleMode === 'weekly' && (
+                <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                  <Typography variant="caption" color="text.secondary">Days</Typography>
+                  {DAYS.map((d) => (
+                    <Button
+                      key={d.id}
+                      size="small"
+                      variant={weeklyDays.includes(d.id) ? 'contained' : 'outlined'}
+                      onClick={() => toggleWeeklyDay(d.id)}
+                      color={Boolean(scanSchedule.enabled) ? 'success' : 'primary'}
+                    >
+                      {d.label}
+                    </Button>
+                  ))}
+                </Box>
+              )}
             </Box>
           </Paper>
         </Grid>
@@ -304,6 +498,17 @@ function Dashboard() {
         onRun={async (form) => {
           await handleRunScanNow({ networkRanges: form.networkRanges, verbose: form.verbose });
           setRunDialogOpen(false);
+        }}
+      />
+
+      <ExactDateTimeDialog
+        open={exactPickerOpen}
+        onClose={() => setExactPickerOpen(false)}
+        valueIso={scheduleDate && scheduleTime ? new Date(`${scheduleDate}T${scheduleTime}:00`).toISOString() : null}
+        title="Exact schedule"
+        onSave={(_iso, parts) => {
+          if (parts?.date) setScheduleDate(parts.date);
+          if (parts?.time) setScheduleTime(parts.time);
         }}
       />
 

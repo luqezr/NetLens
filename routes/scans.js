@@ -4,6 +4,101 @@ const scanManager = require('../scan/scanManager');
 
 const router = express.Router();
 
+function parseTimeOfDay(raw) {
+  const s = String(raw || '').trim();
+
+  // 24-hour HH:MM
+  let m = s.match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+  if (m) return { hour: Number(m[1]), minute: Number(m[2]) };
+
+  // 12-hour h:MM AM/PM
+  m = s.match(/^(\d{1,2}):(\d{2})\s*([AaPp][Mm])$/);
+  if (!m) return null;
+  let hour = Number(m[1]);
+  const minute = Number(m[2]);
+  const ampm = String(m[3]).toLowerCase();
+  if (!Number.isFinite(hour) || hour < 1 || hour > 12) return null;
+  if (!Number.isFinite(minute) || minute < 0 || minute > 59) return null;
+  if (ampm === 'pm' && hour !== 12) hour += 12;
+  if (ampm === 'am' && hour === 12) hour = 0;
+  return { hour, minute };
+}
+
+function computeNextDaily(now, timeStr) {
+  const tm = parseTimeOfDay(timeStr);
+  if (!tm) return null;
+  const d = new Date(now);
+  d.setSeconds(0, 0);
+  d.setHours(tm.hour, tm.minute, 0, 0);
+  if (d.getTime() <= now.getTime()) d.setDate(d.getDate() + 1);
+  return d;
+}
+
+function computeNextWeekly(now, daysOfWeek, timeStr) {
+  const tm = parseTimeOfDay(timeStr);
+  if (!tm) return null;
+  const days = Array.isArray(daysOfWeek) ? daysOfWeek.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n >= 0 && n <= 6) : [];
+  const set = new Set(days);
+  if (set.size === 0) return null;
+
+  for (let offset = 0; offset <= 8; offset += 1) {
+    const d = new Date(now);
+    d.setDate(d.getDate() + offset);
+    d.setSeconds(0, 0);
+    d.setHours(tm.hour, tm.minute, 0, 0);
+
+    const dow = d.getDay();
+    if (!set.has(dow)) continue;
+    if (d.getTime() <= now.getTime()) continue;
+    return d;
+  }
+  return null;
+}
+
+function computeOccurrences({ enabled, mode, intervalMinutes, exactAt, dailyAt, weeklyAt, weeklyDays, count = 10 }) {
+  if (!enabled) return [];
+  const now = new Date();
+  const items = [];
+
+  if (mode === 'exact') {
+    if (!exactAt) return [];
+    const d = new Date(exactAt);
+    if (Number.isNaN(d.getTime())) return [];
+    return [d];
+  }
+
+  if (mode === 'daily') {
+    let next = computeNextDaily(now, dailyAt);
+    if (!next) return [];
+    for (let i = 0; i < count; i += 1) {
+      items.push(new Date(next));
+      next = new Date(next);
+      next.setDate(next.getDate() + 1);
+    }
+    return items;
+  }
+
+  if (mode === 'weekly') {
+    let cursor = now;
+    for (let i = 0; i < count; i += 1) {
+      const next = computeNextWeekly(cursor, weeklyDays, weeklyAt);
+      if (!next) break;
+      items.push(next);
+      // Advance slightly past the found time to find the following occurrence.
+      cursor = new Date(next.getTime() + 60 * 1000);
+    }
+    return items;
+  }
+
+  // interval
+  const interval = Math.max(1, Math.min(1440, Number(intervalMinutes) || 60));
+  const first = new Date(now.getTime() + interval * 60 * 1000);
+  for (let i = 0; i < count; i += 1) {
+    items.push(new Date(first.getTime() + i * interval * 60 * 1000));
+  }
+  return items;
+}
+
 function getDb() {
   if (!mongoose.connection || !mongoose.connection.db) {
     throw new Error('MongoDB not connected');
@@ -95,36 +190,27 @@ router.get('/schedule', async (req, res) => {
       .collection('settings')
       .findOne({ _id: 'scan_schedule' });
 
-    const base = schedule || { _id: 'scan_schedule', enabled: false, interval_minutes: 60, mode: 'interval', exact_at: null };
+    const base = schedule || { _id: 'scan_schedule', enabled: false, interval_minutes: 60, mode: 'interval', exact_at: null, daily_at: null, weekly_at: null, weekly_days: [], network_ranges: null };
     const enabled = Boolean(base.enabled);
-    const mode = base.mode === 'exact' ? 'exact' : 'interval';
+    const mode = ['interval', 'exact', 'daily', 'weekly'].includes(base.mode) ? base.mode : (base.mode === 'exact' ? 'exact' : 'interval');
     const interval = Math.max(1, Math.min(1440, Number(base.interval_minutes) || 60));
-    const now = new Date();
-    let next = null;
-    if (enabled) {
-      if (mode === 'exact' && base.exact_at) {
-        const d = new Date(base.exact_at);
-        next = Number.isNaN(d.getTime()) ? null : d;
-      } else {
-        next = new Date(now.getTime() + interval * 60 * 1000);
-      }
-    }
-    const occurrences = [];
-    if (enabled) {
-      if (mode === 'exact') {
-        if (next) occurrences.push(next);
-      } else if (next) {
-        for (let i = 0; i < 10; i += 1) {
-          occurrences.push(new Date(next.getTime() + i * interval * 60 * 1000));
-        }
-      }
-    }
+
+    const occurrences = computeOccurrences({
+      enabled,
+      mode,
+      intervalMinutes: interval,
+      exactAt: base.exact_at,
+      dailyAt: base.daily_at,
+      weeklyAt: base.weekly_at,
+      weeklyDays: base.weekly_days,
+      count: 10,
+    });
 
     res.json({
       success: true,
       data: {
         ...base,
-  mode,
+        mode,
         interval_minutes: interval,
         next_occurrences: occurrences,
       },
@@ -142,6 +228,12 @@ router.delete('/schedule', async (req, res) => {
       _id: 'scan_schedule',
       enabled: false,
       interval_minutes: 60,
+      mode: 'interval',
+      exact_at: null,
+      daily_at: null,
+      weekly_at: null,
+      weekly_days: [],
+      network_ranges: null,
       updated_at: new Date(),
     };
 
@@ -150,6 +242,13 @@ router.delete('/schedule', async (req, res) => {
       { $set: update, $setOnInsert: { created_at: new Date() } },
       { upsert: true }
     );
+
+    // Apply immediately (don't wait for the next 60s refresh tick).
+    try {
+      await scanManager.refreshScheduleNow({ getDb });
+    } catch {
+      // ignore
+    }
 
     res.json({ success: true, data: update });
   } catch (error) {
@@ -163,9 +262,19 @@ router.post('/schedule', async (req, res) => {
     const enabled = Boolean(req.body?.enabled);
     const intervalMinutesRaw = req.body?.interval_minutes;
 
-  // Optional: exact run time (one-shot). UI sends an ISO string.
-  // If set, the server will enqueue a scan at or after that timestamp.
-  const exactAtRaw = req.body?.exact_at || req.body?.exactAt || null;
+    const networkRangesRaw = (req.body?.network_ranges || req.body?.networkRanges || '').toString().trim();
+    // Store as a comma-separated list; empty means "use default NETWORK_RANGES".
+    const network_ranges = networkRangesRaw ? networkRangesRaw : null;
+
+    const modeRaw = String(req.body?.mode || '').trim().toLowerCase();
+    const mode = ['interval', 'exact', 'daily', 'weekly'].includes(modeRaw) ? modeRaw : 'interval';
+
+    // Optional: exact run time (one-shot). UI sends an ISO string.
+    // If set, the server will enqueue a scan at or after that timestamp.
+    const exactAtRaw = req.body?.exact_at || req.body?.exactAt || null;
+    const dailyAtRaw = req.body?.daily_at || req.body?.dailyAt || null;
+    const weeklyAtRaw = req.body?.weekly_at || req.body?.weeklyAt || null;
+    const weeklyDaysRaw = req.body?.weekly_days || req.body?.weeklyDays || null;
 
     let intervalMinutes = null;
     if (intervalMinutesRaw !== undefined && intervalMinutesRaw !== null && intervalMinutesRaw !== '') {
@@ -180,7 +289,10 @@ router.post('/schedule', async (req, res) => {
     }
 
     let exactAt = null;
-    if (exactAtRaw) {
+    if (mode === 'exact') {
+      if (!exactAtRaw) {
+        return res.status(400).json({ success: false, error: 'exact_at is required when mode=exact' });
+      }
       const d = new Date(exactAtRaw);
       if (Number.isNaN(d.getTime())) {
         return res.status(400).json({ success: false, error: 'exact_at must be a valid ISO datetime string' });
@@ -188,12 +300,44 @@ router.post('/schedule', async (req, res) => {
       exactAt = d;
     }
 
+    let dailyAt = null;
+    if (mode === 'daily') {
+      const tm = parseTimeOfDay(dailyAtRaw);
+      if (!tm) {
+        return res.status(400).json({ success: false, error: 'daily_at must be a time string like HH:MM (00:00-23:59) or h:MM AM/PM' });
+      }
+      dailyAt = `${String(tm.hour).padStart(2, '0')}:${String(tm.minute).padStart(2, '0')}`;
+    }
+
+    let weeklyAt = null;
+    let weeklyDays = [];
+    if (mode === 'weekly') {
+      const tm = parseTimeOfDay(weeklyAtRaw);
+      if (!tm) {
+        return res.status(400).json({ success: false, error: 'weekly_at must be a time string like HH:MM (00:00-23:59) or h:MM AM/PM' });
+      }
+      weeklyAt = `${String(tm.hour).padStart(2, '0')}:${String(tm.minute).padStart(2, '0')}`;
+
+      const raw = Array.isArray(weeklyDaysRaw) ? weeklyDaysRaw : (typeof weeklyDaysRaw === 'string' ? weeklyDaysRaw.split(',') : []);
+      weeklyDays = raw
+        .map((v) => Number(v))
+        .filter((n) => Number.isInteger(n) && n >= 0 && n <= 6);
+      weeklyDays = Array.from(new Set(weeklyDays)).sort((a, b) => a - b);
+      if (weeklyDays.length === 0) {
+        return res.status(400).json({ success: false, error: 'weekly_days must contain at least one weekday number (0=Sun..6=Sat)' });
+      }
+    }
+
     const update = {
       _id: 'scan_schedule',
       enabled,
-  mode: exactAt ? 'exact' : 'interval',
-  interval_minutes: intervalMinutes ?? 60,
-  exact_at: exactAt,
+      mode,
+      interval_minutes: intervalMinutes ?? 60,
+      exact_at: mode === 'exact' ? exactAt : null,
+      daily_at: mode === 'daily' ? dailyAt : null,
+      weekly_at: mode === 'weekly' ? weeklyAt : null,
+      weekly_days: mode === 'weekly' ? weeklyDays : [],
+      network_ranges,
       updated_at: new Date(),
     };
 
@@ -202,6 +346,13 @@ router.post('/schedule', async (req, res) => {
       { $set: update, $setOnInsert: { created_at: new Date() } },
       { upsert: true }
     );
+
+    // Apply immediately (don't wait for the next 60s refresh tick).
+    try {
+      await scanManager.refreshScheduleNow({ getDb });
+    } catch {
+      // ignore
+    }
 
     res.json({ success: true, data: update });
   } catch (error) {

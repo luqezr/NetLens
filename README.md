@@ -43,7 +43,7 @@ NetLens uses these external programs (the installer installs most of them):
 
 ```bash
 # Clone repository
-git clone <your-repo>
+git clone https://github.com/luqezr/NetLens.git
 cd NetLens
 
 # Run installation script (as root)
@@ -434,6 +434,7 @@ sudo /opt/netlens/venv/bin/python /opt/netlens/scanner_service.py --run-once
 ## 🤝 Contributing
 
 Feel free to submit issues and enhancement requests!
+Or [buy me a coffee!](https://buymeacoffee.com/luqezr)
 
 ## 📄 License
 

@@ -493,6 +493,7 @@ function DeviceList() {
       <DeviceDetailDialog
         open={detailOpen}
         onClose={() => setDetailOpen(false)}
+        onChanged={() => fetchDevices()}
         deviceIp={selectedDeviceIp}
       />
     </Box>

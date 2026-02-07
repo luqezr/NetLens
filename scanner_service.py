@@ -1025,11 +1025,48 @@ def _scan_host(ip: str, scan_at: datetime) -> dict:
 
 
 def run_scan(manager: MongoDBManager, reason: str, scan_request_id: Optional[str] = None, network_ranges: Optional[str] = None) -> dict:
+	def _auto_detect_ranges() -> list[str]:
+		"""Best-effort local CIDR detection.
+
+		Prefers the actual interface CIDRs (via `_local_ipv4_networks()`), but clamps
+		very large networks down to /24 for safety.
+		"""
+		try:
+			nets = _local_ipv4_networks(ttl_seconds=10)
+		except Exception:
+			nets = []
+		out: list[str] = []
+		seen = set()
+		for n in nets:
+			try:
+				if not isinstance(n, ipaddress.IPv4Network):
+					continue
+				# Skip loopback.
+				if n.network_address.is_loopback:
+					continue
+				# Clamp very large subnets to /24 to avoid accidental /16+/0 scans.
+				if n.prefixlen < 24:
+					clamped = ipaddress.IPv4Network(f"{n.network_address}/24", strict=False)
+					s = str(clamped)
+				else:
+					s = str(n)
+				if s in seen:
+					continue
+				seen.add(s)
+				out.append(s)
+			except Exception:
+				continue
+		return out
+
 	# Determine scan target ranges.
 	if network_ranges:
 		ranges = [p.strip() for p in str(network_ranges).replace(';', ',').split(',') if p.strip()]
 	else:
 		ranges = _parse_network_ranges()
+	if not ranges and str(reason or '').strip().lower() == 'scheduled':
+		ranges = _auto_detect_ranges()
+		if ranges:
+			logger.info('Auto-detected ranges for scheduled scan: {}', ', '.join(ranges))
 	if not ranges:
 		logger.warning('NETWORK_RANGES is empty; no scan performed')
 		return {'reason': reason, 'error': 'NETWORK_RANGES is empty'}
@@ -1075,7 +1112,9 @@ def run_scan(manager: MongoDBManager, reason: str, scan_request_id: Optional[str
 		ranges,
 		log_cb=lambda level, msg: _append_scan_log(manager.db, scan_request_id, level, msg),
 	)
-	current_ips: list[str] = []
+	# Track which IPs were targeted vs which were confirmed up.
+	scanned_targets: list[str] = []
+	up_ips: list[str] = []
 	devices_snapshot: list[dict] = []
 
 	total_hosts = len(discovered)
@@ -1121,15 +1160,26 @@ def run_scan(manager: MongoDBManager, reason: str, scan_request_id: Optional[str
 		'progress.phase': 'scanning',
 	})
 
-	for idx, ip in enumerate(discovered, start=1):
+	# Treat discovery output as scan targets. Some discovery modes (assume-up fallback)
+	# may include candidates that are not actually up.
+	scanned_targets = list(discovered)
+
+	for idx, ip in enumerate(scanned_targets, start=1):
 		_append_scan_log(manager.db, scan_request_id, 'info', f"Scanning {ip} ({idx}/{total_hosts})")
 		device = _scan_host(ip, scan_at=scan_at)
 		# Sanitize device data to ensure all keys are strings for MongoDB
 		device = _sanitize_for_mongodb(device)
-		current_ips.append(ip)
-		manager.upsert_device(device)
-		# Keep a snapshot for scan history detail view
-		devices_snapshot.append(device)
+
+		host_state = str(device.get('host_state') or '').strip().lower()
+		is_up = host_state == 'up'
+		if is_up:
+			up_ips.append(ip)
+			manager.upsert_device(device)
+			# Keep a snapshot for scan history detail view (only confirmed devices)
+			devices_snapshot.append(device)
+		else:
+			# Don't persist "ghost" devices for targets that are not confirmed up.
+			pass
 
 		# Update progress frequently so UI shows real-time % and devices found
 		percent = int((idx / total_hosts) * 100)
@@ -1144,13 +1194,29 @@ def run_scan(manager: MongoDBManager, reason: str, scan_request_id: Optional[str
 		})
 		logger.info('Scanned {}/{} ({}%): {}', idx, total_hosts, percent, ip)
 
-	offline_count = manager.mark_devices_offline(current_ips)
+	# Mark devices offline only within this scan's target set, and only if they were previously online.
+	# This avoids flipping unrelated devices offline when scanning an alternate range.
+	offline_count = 0
+	try:
+		if scanned_targets:
+			res = manager.devices.update_many(
+				{
+					"ip_address": {"$in": scanned_targets, "$nin": up_ips},
+					"status": "online",
+				},
+				{"$set": {"status": "offline"}},
+			)
+			offline_count = int(getattr(res, 'modified_count', 0) or 0)
+	except Exception:
+		offline_count = 0
 	completed = datetime.now(timezone.utc)
 
 	stats = {
 		'ranges': ranges,
 		'hosts_discovered': len(discovered),
-		'devices_upserted': len(current_ips),
+		'hosts_targeted': len(scanned_targets),
+		'hosts_up': len(up_ips),
+		'devices_upserted': len(up_ips),
 		'devices_marked_offline': offline_count,
 		'duration_seconds': int((completed - started).total_seconds()),
 	}
@@ -1253,7 +1319,10 @@ def main() -> int:
 	ensure_schedule()
 
 	if run_once:
-		run_scan_guarded(reason='manual_cli')
+		# Embedded mode (spawned by the Node API) can provide context via env vars.
+		# Honor SCAN_REASON so scheduled scans can auto-detect ranges.
+		env_reason = (os.getenv('SCAN_REASON') or '').strip()
+		run_scan_guarded(reason=(env_reason or 'manual_cli'))
 		return 0
 
 	last_schedule_check = 0.0
@@ -1274,8 +1343,9 @@ def main() -> int:
 				try:
 					restore = _apply_request_options(req.get('options'))
 					try:
+						reason = str(req.get('type') or '').strip() or 'manual_request'
 						result = run_scan_guarded(
-							reason='manual_request',
+							reason=reason,
 							scan_request_id=req_id,
 							network_ranges=req.get('network_ranges'),
 						)

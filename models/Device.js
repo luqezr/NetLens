@@ -8,6 +8,7 @@ const DeviceSchema = new mongoose.Schema({
   hostnames: [String],
   vendor: String,
   device_type: String,
+  notes: String,
   // Scanner may provide rich OS info (nmap osmatch/osclass, etc). Keep it flexible.
   os: mongoose.Schema.Types.Mixed,
   // Some paths use connection_method; others use connection object.

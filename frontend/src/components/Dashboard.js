@@ -88,12 +88,13 @@ function Dashboard() {
       const current = String(scanSchedule?.network_ranges || '').trim();
       if (current) return;
       const res = await getSuggestedNetworkRanges();
-      const ranges = res?.data?.data?.ranges || res?.data?.data || res?.data?.ranges || [];
-      const first = Array.isArray(ranges) ? ranges[0] : null;
-      if (first) {
+      const suggestions = res?.data?.data?.suggestions || [];
+      const first = Array.isArray(suggestions) ? suggestions[0] : null;
+      const cidr = first?.cidr ? String(first.cidr) : null;
+      if (cidr) {
         markScheduleDirty();
-        setScanScheduleState((s) => ({ ...s, network_ranges: String(first) }));
-        setScanMessage({ severity: 'info', text: `Schedule network range set to ${first}. Edit if needed.` });
+        setScanScheduleState((s) => ({ ...s, network_ranges: cidr }));
+        setScanMessage({ severity: 'info', text: `Schedule network range set to ${cidr}. Edit if needed.` });
       }
     } catch {
       // best-effort
@@ -219,6 +220,21 @@ function Dashboard() {
         exactAt = local.toISOString();
       }
 
+      let networkRangesToSave = String(scanSchedule?.network_ranges || '').trim();
+      if (!networkRangesToSave) {
+        try {
+          const res = await getSuggestedNetworkRanges();
+          const suggestions = res?.data?.data?.suggestions || [];
+          const first = Array.isArray(suggestions) ? suggestions[0] : null;
+          if (first?.cidr) {
+            networkRangesToSave = String(first.cidr);
+            setScanScheduleState((s) => ({ ...s, network_ranges: networkRangesToSave }));
+          }
+        } catch {
+          // ignore
+        }
+      }
+
       await setScanSchedule({
         enabled: Boolean(scanSchedule.enabled),
         interval_minutes: Number(scanSchedule.interval_minutes) || 60,
@@ -227,7 +243,7 @@ function Dashboard() {
         daily_at: scheduleMode === 'daily' ? (normalizeTimeTo24h(dailyAt) || dailyAt) : null,
         weekly_at: scheduleMode === 'weekly' ? (normalizeTimeTo24h(weeklyAt) || weeklyAt) : null,
         weekly_days: scheduleMode === 'weekly' ? weeklyDays : null,
-        network_ranges: String(scanSchedule?.network_ranges || '').trim() || null,
+        network_ranges: networkRangesToSave || null,
       });
       setScanMessage({ severity: 'success', text: 'Schedule updated.' });
 

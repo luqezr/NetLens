@@ -264,7 +264,7 @@ router.post('/schedule', async (req, res) => {
 
     const networkRangesRaw = (req.body?.network_ranges || req.body?.networkRanges || '').toString().trim();
     // Store as a comma-separated list; empty means "use default NETWORK_RANGES".
-    const network_ranges = networkRangesRaw ? networkRangesRaw : null;
+    let network_ranges = networkRangesRaw ? networkRangesRaw : null;
 
     const modeRaw = String(req.body?.mode || '').trim().toLowerCase();
     const mode = ['interval', 'exact', 'daily', 'weekly'].includes(modeRaw) ? modeRaw : 'interval';
@@ -325,6 +325,17 @@ router.post('/schedule', async (req, res) => {
       weeklyDays = Array.from(new Set(weeklyDays)).sort((a, b) => a - b);
       if (weeklyDays.length === 0) {
         return res.status(400).json({ success: false, error: 'weekly_days must contain at least one weekday number (0=Sun..6=Sat)' });
+      }
+    }
+
+    // If the schedule is being enabled and no ranges were provided, auto-pick the first suggested CIDR.
+    if (enabled && !network_ranges) {
+      try {
+        const suggestions = scanManager.suggestNetworkRanges();
+        const first = Array.isArray(suggestions) ? suggestions[0] : null;
+        if (first?.cidr) network_ranges = String(first.cidr);
+      } catch {
+        // best-effort
       }
     }
 

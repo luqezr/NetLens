@@ -52,11 +52,23 @@ router.get('/:ip', async (req, res) => {
 // UPDATE device metadata
 router.patch('/:ip', async (req, res) => {
   try {
-    const { metadata } = req.body;
-    
+    const updates = {};
+
+    // Allow updating a few safe user-editable fields.
+    if (req.body && typeof req.body === 'object') {
+      if (req.body.device_type !== undefined) updates.device_type = req.body.device_type;
+      if (req.body.notes !== undefined) updates.notes = req.body.notes;
+      if (req.body.metadata !== undefined) updates.metadata = req.body.metadata;
+    }
+
+    // No-op protection
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, error: 'No updatable fields provided' });
+    }
+
     const device = await Device.findOneAndUpdate(
       { ip_address: req.params.ip },
-      { $set: { metadata } },
+      { $set: updates },
       { new: true }
     );
     

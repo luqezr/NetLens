@@ -146,12 +146,13 @@ export default function ScansList() {
       const current = String(schedule?.network_ranges || '').trim();
       if (current) return;
       const res = await getSuggestedNetworkRanges();
-      const ranges = res?.data?.data?.ranges || res?.data?.data || res?.data?.ranges || [];
-      const first = Array.isArray(ranges) ? ranges[0] : null;
-      if (first) {
+      const suggestions = res?.data?.data?.suggestions || [];
+      const first = Array.isArray(suggestions) ? suggestions[0] : null;
+      const cidr = first?.cidr ? String(first.cidr) : null;
+      if (cidr) {
         markScheduleDirty();
-        setSchedule((s) => ({ ...s, network_ranges: String(first) }));
-        setMessage({ severity: 'info', text: `Schedule network range set to ${first}. Edit if needed.` });
+        setSchedule((s) => ({ ...s, network_ranges: cidr }));
+        setMessage({ severity: 'info', text: `Schedule network range set to ${cidr}. Edit if needed.` });
       }
     } catch {
       // best-effort
@@ -294,6 +295,21 @@ export default function ScansList() {
       const dailyAtNorm = scheduleMode === 'daily' ? (normalizeTimeTo24h(dailyAt) || dailyAt) : null;
       const weeklyAtNorm = scheduleMode === 'weekly' ? (normalizeTimeTo24h(weeklyAt) || weeklyAt) : null;
 
+      let networkRangesToSave = String(schedule?.network_ranges || '').trim();
+      if (!networkRangesToSave) {
+        try {
+          const res = await getSuggestedNetworkRanges();
+          const suggestions = res?.data?.data?.suggestions || [];
+          const first = Array.isArray(suggestions) ? suggestions[0] : null;
+          if (first?.cidr) {
+            networkRangesToSave = String(first.cidr);
+            setSchedule((s) => ({ ...s, network_ranges: networkRangesToSave }));
+          }
+        } catch {
+          // ignore
+        }
+      }
+
       await setScanSchedule({
         enabled: Boolean(schedule.enabled),
         interval_minutes: Number(schedule.interval_minutes) || 60,
@@ -302,7 +318,7 @@ export default function ScansList() {
         daily_at: dailyAtNorm,
         weekly_at: weeklyAtNorm,
         weekly_days: scheduleMode === 'weekly' ? weeklyDays : null,
-        network_ranges: String(schedule?.network_ranges || '').trim() || null,
+        network_ranges: networkRangesToSave || null,
       });
       clearScheduleDirty();
       setMessage({ severity: 'success', text: 'Schedule updated.' });

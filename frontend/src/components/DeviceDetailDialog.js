@@ -10,17 +10,23 @@ import {
   DialogContent,
   DialogTitle,
   Divider,
+  FormControl,
+  InputLabel,
+  MenuItem,
   Paper,
+  Select,
   Table,
   TableBody,
   TableCell,
   TableContainer,
   TableHead,
   TableRow,
+  TextField,
   Typography,
 } from '@mui/material';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
-import { getDeviceByIp } from '../services/api';
+import DeleteIcon from '@mui/icons-material/Delete';
+import { deleteDevice, getDeviceByIp, updateDevice } from '../services/api';
 
 function safeToString(value) {
   if (value === null || value === undefined) return '—';
@@ -66,14 +72,26 @@ function KeyValueTable({ rows }) {
   );
 }
 
-export default function DeviceDetailDialog({ open, onClose, deviceIp, device: deviceProp }) {
+export default function DeviceDetailDialog({ open, onClose, onChanged, deviceIp, device: deviceProp }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [device, setDevice] = useState(deviceProp || null);
 
+  const [editType, setEditType] = useState('');
+  const [editNotes, setEditNotes] = useState('');
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [actionError, setActionError] = useState(null);
+
   useEffect(() => {
     setDevice(deviceProp || null);
   }, [deviceProp, open]);
+
+  useEffect(() => {
+    // Initialize edit fields whenever the device changes.
+    setEditType(device?.device_type ? String(device.device_type) : '');
+    setEditNotes(device?.notes ? String(device.notes) : '');
+  }, [device?._id, device?.ip_address, open]);
 
   useEffect(() => {
     const shouldFetch = Boolean(open) && Boolean(deviceIp);
@@ -132,11 +150,82 @@ export default function DeviceDetailDialog({ open, onClose, deviceIp, device: de
 
   const raw = device ? prettyJson(device) : '';
 
+  const deviceTypeOptions = useMemo(
+    () => [
+      { value: '', label: 'Unknown' },
+      { value: 'router', label: 'Router' },
+      { value: 'switch', label: 'Switch' },
+      { value: 'server', label: 'Server' },
+      { value: 'windows_pc', label: 'Windows PC' },
+      { value: 'linux_pc', label: 'Linux PC' },
+      { value: 'mac', label: 'Mac' },
+      { value: 'mobile', label: 'Mobile' },
+      { value: 'printer', label: 'Printer' },
+      { value: 'network device', label: 'Network device' },
+      { value: 'workstation', label: 'Workstation' },
+      { value: 'iot', label: 'IoT' },
+    ],
+    []
+  );
+
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(raw);
     } catch {
       // ignore clipboard errors
+    }
+  };
+
+  const handleSave = async () => {
+    if (!deviceIp && !device?.ip_address) return;
+    try {
+      setActionError(null);
+      setSaveBusy(true);
+
+      const ip = device?.ip_address || deviceIp;
+      const payload = {
+        device_type: editType === '' ? null : editType,
+        notes: editNotes === '' ? null : editNotes,
+      };
+
+      const res = await updateDevice(ip, payload);
+      const updated = res?.data?.data;
+      if (updated) setDevice(updated);
+
+	  try {
+		  if (typeof onChanged === 'function') onChanged({ type: 'updated', ip });
+	  } catch {
+		  // ignore
+	  }
+    } catch (e) {
+      setActionError(e?.response?.data?.error || e.message || 'Failed to update device');
+    } finally {
+      setSaveBusy(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!deviceIp && !device?.ip_address) return;
+    const ip = device?.ip_address || deviceIp;
+    const ok = window.confirm(`Delete device ${ip}? This cannot be undone.`);
+    if (!ok) return;
+
+    try {
+      setActionError(null);
+      setDeleteBusy(true);
+      await deleteDevice(ip);
+      setDevice(null);
+
+	  try {
+		  if (typeof onChanged === 'function') onChanged({ type: 'deleted', ip });
+	  } catch {
+		  // ignore
+	  }
+      onClose?.();
+    } catch (e) {
+      setActionError(e?.response?.data?.error || e.message || 'Failed to delete device');
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -167,6 +256,8 @@ export default function DeviceDetailDialog({ open, onClose, deviceIp, device: de
 
       <DialogContent dividers>
         {error && <Alert severity="warning" sx={{ mb: 2 }}>{error}</Alert>}
+
+        {actionError && <Alert severity="error" sx={{ mb: 2 }}>{actionError}</Alert>}
 
         {loading && (
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 2 }}>
@@ -201,7 +292,25 @@ export default function DeviceDetailDialog({ open, onClose, deviceIp, device: de
                     ),
                 },
                 { label: 'Vendor', value: safeToString(device.vendor) },
-                { label: 'Device type', value: safeToString(device.device_type) },
+                {
+                  label: 'Device type',
+                  value: (
+                    <FormControl size="small" sx={{ minWidth: 220 }}>
+                      <InputLabel id="device-type-label">Type</InputLabel>
+                      <Select
+                        labelId="device-type-label"
+                        label="Type"
+                        value={editType}
+                        onChange={(e) => setEditType(e.target.value)}
+                        disabled={loading || saveBusy || deleteBusy}
+                      >
+                        {deviceTypeOptions.map((opt) => (
+                          <MenuItem key={opt.value || 'unknown'} value={opt.value}>{opt.label}</MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  ),
+                },
                 { label: 'OS', value: osLabel ? safeToString(osLabel) : '—' },
                 { label: 'OS version', value: osVersion ? safeToString(osVersion) : '—' },
                 { label: 'Connection', value: connectionLabel ? safeToString(connectionLabel) : '—' },
@@ -214,6 +323,19 @@ export default function DeviceDetailDialog({ open, onClose, deviceIp, device: de
                 { label: 'CVE count', value: Number.isFinite(Number(cveCount)) ? cveCount : '—' },
               ]}
             />
+
+            <Box sx={{ mt: 2 }}>
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>Notes</Typography>
+              <TextField
+                fullWidth
+                multiline
+                minRows={3}
+                placeholder="Add notes about this device…"
+                value={editNotes}
+                onChange={(e) => setEditNotes(e.target.value)}
+                disabled={loading || saveBusy || deleteBusy}
+              />
+            </Box>
 
             <Divider sx={{ my: 2 }} />
 
@@ -319,7 +441,24 @@ export default function DeviceDetailDialog({ open, onClose, deviceIp, device: de
       </DialogContent>
 
       <DialogActions>
-        <Button onClick={onClose}>Close</Button>
+        <Button
+          color="error"
+          variant="outlined"
+          startIcon={<DeleteIcon />}
+          onClick={handleDelete}
+          disabled={!device || loading || saveBusy || deleteBusy}
+        >
+          Delete device
+        </Button>
+        <Box sx={{ flex: 1 }} />
+        <Button
+          onClick={handleSave}
+          variant="contained"
+          disabled={!device || loading || saveBusy || deleteBusy}
+        >
+          {saveBusy ? 'Saving…' : 'Save'}
+        </Button>
+        <Button onClick={onClose} disabled={saveBusy || deleteBusy}>Close</Button>
       </DialogActions>
     </Dialog>
   );
